@@ -1,0 +1,12 @@
+api_key:
+api_base: https://jeans-movies-interviews-blast.trycloudflare.com/v1
+model: Qwen_Qwen2.5-3B-Instruct-GGUF
+context_max_tokens: 8092
+assistant_minimum_context_tokens: 2048
+stop_words:
+- |2-
+
+  <|im_start|>
+- <|im_end|>
+session_db_url: "/Users/tg/Library/Application Support/com.awful-sec.aj/aj.db"
+session_name: None
