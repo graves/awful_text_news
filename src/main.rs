@@ -177,7 +177,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let json = serde_json::to_string(&front_page).unwrap();
 
-            let midnight = NaiveTime::from_hms_opt(24, 00, 0).unwrap();
+            let midnight = NaiveTime::from_hms_opt(23, 59, 59).unwrap();
             let today = Local::now().time();
             let yesterday = today - Duration::days(1);
 
