@@ -243,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "awful_text_news"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "awful_aj",
  "chrono",
