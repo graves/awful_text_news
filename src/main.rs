@@ -213,7 +213,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("Processed {}/{} articles", processed_count, articles.len());
     }
 
-    let midnight = NaiveTime::from_hms_opt(24, 00, 0).unwrap();
+    let midnight = NaiveTime::from_hms_opt(23, 59, 59).unwrap();
     let today = Local::now().time();
     let yesterday = today - Duration::days(1);
 
