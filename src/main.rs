@@ -15,6 +15,8 @@ use std::fmt::Write;
 use tokio::fs;
 use url::Url;
 use clap::Parser;
+use std::path::Path;
+use tokio::io::AsyncWriteExt;
 
 
 #[derive(Parser, Debug)]
@@ -229,6 +231,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Wrote FrontPage to {}", output_markdown_filename);
 
+    let _res = update_date_toc_file(&args.markdown_output_dir, &front_page, &output_markdown_filename).await?;
+
     let elapsed = start_time.elapsed();
     println!(
         "Execution time: {:.2?} ({}.{:03} seconds)",
@@ -380,4 +384,60 @@ pub fn front_page_to_markdown(front_page: &FrontPage) -> String {
     }
 
     md
+}
+
+/// Sanitize titles into Markdown-compatible fragment identifiers
+fn slugify_title(title: &str) -> String {
+    title
+        .to_lowercase()
+        .replace(|c: char| !c.is_alphanumeric() && c != ' ', "")
+        .replace(' ', "-")
+}
+
+/// Append or create a TOC markdown file for the day's editions
+async fn update_date_toc_file(
+    markdown_output_dir: &str,
+    front_page: &FrontPage,
+    markdown_filename: &str,
+) -> Result<(), Box<dyn Error>> {
+    let toc_path = format!("{}/{}.md", markdown_output_dir, front_page.local_date);
+    let mut toc_md = String::new();
+
+    if !Path::new(&toc_path).exists() {
+        writeln!(
+            toc_md,
+            "# Editions published on {}\n",
+            front_page.local_date
+        )
+        .unwrap();
+    }
+
+    writeln!(
+        toc_md,
+        "- [{}](./{})",
+        front_page.time_of_day,
+        markdown_filename
+    )
+    .unwrap();
+
+    for article in &front_page.articles {
+        let slug = slugify_title(&article.title);
+        writeln!(
+            toc_md,
+            "\t- [{}]({}#{})",
+            article.title, markdown_filename, slug
+        )
+        .unwrap();
+    }
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&toc_path)
+        .await?;
+
+    file.write_all(toc_md.as_bytes()).await?;
+
+    println!("Updated TOC file at {}", toc_path);
+    Ok(())
 }
