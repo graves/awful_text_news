@@ -24,7 +24,25 @@ Awful Text News uses the [awful_aj](https://github.com/graves/awful_aj) OpenAI-c
 
 ## Installation
 
-[Install rust.](https://www.rust-lang.org/tools/install)
+[Install Rust.](https://www.rust-lang.org/tools/install)
+
+[Install Conda.](https://docs.conda.io/projects/conda/en/latest/user-guide/install/index.html#regular-installation)
+
+Install Python 3.11.0 and Pytorch.
+
+```sh
+conda install -c conda-forge python=3.11.0
+conda install pytorch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 -c pytorch
+```
+
+Add the Pytorch libraries to your load path.
+
+```sh
+export LIBTORCH=$HOME/miniconda3/lib/python3.11/site-packages/torch
+export LD_LIBRARY_PATH=${LIBTORCH}/lib:$LD_LIBRARY_PATH
+```
+
+*Note: LD_LIBRARY_PATH is DYLD_LIBRARY_PATH_ on MacOS*
 
 ```sh
 cargo install awful_text_news

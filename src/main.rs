@@ -2,6 +2,7 @@ use awful_aj::api::ask;
 use awful_aj::config;
 use awful_aj::config_dir;
 use awful_aj::template;
+use chrono::Duration;
 use chrono::Local;
 use chrono::NaiveTime;
 use futures::stream::{self, StreamExt};
@@ -53,6 +54,7 @@ pub struct AwfulNewsArticle {
     pub namedEntities: Vec<NamedEntity>,
     pub importantDates: Vec<ImportantDate>,
     pub importantTimeframes: Vec<ImportantTimeframe>,
+    pub content: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -170,17 +172,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if awful_news_article.is_ok() {
             let mut awful_news_article = awful_news_article.unwrap();
             awful_news_article.source = Some(article.source.clone());
+            awful_news_article.content = Some(article.content.clone());
             front_page.articles.push(awful_news_article);
 
             let json = serde_json::to_string(&front_page).unwrap();
 
-            let api_file_dir = format!("{}", front_page.local_date);
+            let midnight = NaiveTime::from_hms_opt(24, 00, 0).unwrap();
+            let today = Local::now().time();
+            let yesterday = today - Duration::days(1);
+
+            let api_file_dir = if front_page.time_of_day == "evening" && (today >= midnight) {
+                format!("{}", yesterday.to_string())
+            } else {
+                format!("{}", front_page.local_date)
+            };
+
             fs::create_dir_all(&api_file_dir).await?;
 
-            let full_json_dir = format!("{}/{}", args.json_output_dir, front_page.local_date);
+            let full_json_dir = if front_page.time_of_day == "evening" && (today >= midnight) {
+                format!("{}/{}", args.json_output_dir, yesterday.to_string())
+            } else {
+                format!("{}/{}", args.json_output_dir, front_page.local_date)
+            };
+
             fs::create_dir_all(&full_json_dir).await?;
 
-            let output_json_filename = format!("{}/{}.json", full_json_dir, front_page.time_of_day);
+            let output_json_filename = if front_page.time_of_day == "evening" && (today >= midnight) {
+                format!("{}/{}.json", full_json_dir, yesterday.to_string())
+            } else {
+                format!("{}/{}.json", full_json_dir, front_page.time_of_day)
+            };
+
             fs::write(&output_json_filename, json).await?;
             if processed_count == 0 {
                 println!("Wrote JSON API file to {}", output_json_filename);
@@ -191,8 +213,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("Processed {}/{} articles", processed_count, articles.len());
     }
 
+    let midnight = NaiveTime::from_hms_opt(24, 00, 0).unwrap();
+    let today = Local::now().time();
+    let yesterday = today - Duration::days(1);
+
     let markdown = front_page_to_markdown(&front_page);
-    let output_markdown_filename = format!("{}/{}_{}.md", args.markdown_output_dir, front_page.local_date, front_page.time_of_day);
+
+    let output_markdown_filename = if front_page.time_of_day == "evening" && (today >= midnight) {
+        format!("{}/{}_{}.md", args.markdown_output_dir, front_page.local_date, yesterday.to_string())
+    } else {
+        format!("{}/{}_{}.md", args.markdown_output_dir, front_page.local_date, front_page.time_of_day)
+    };
+    
     fs::write(&output_markdown_filename, markdown).await?;
 
     println!("Wrote FrontPage to {}", output_markdown_filename);
