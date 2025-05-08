@@ -5,19 +5,19 @@ use awful_aj::template;
 use chrono::Duration;
 use chrono::Local;
 use chrono::NaiveTime;
+use clap::Parser;
 use futures::stream::{self, StreamExt};
+use itertools::Itertools;
 use reqwest::get;
 use scraper::{Html, Selector};
 use serde::Deserialize;
 use serde::Serialize;
 use std::error::Error;
 use std::fmt::Write;
-use tokio::fs;
-use url::Url;
-use clap::Parser;
 use std::path::Path;
+use tokio::fs;
 use tokio::io::AsyncWriteExt;
-
+use url::Url;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -175,6 +175,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let mut awful_news_article = awful_news_article.unwrap();
             awful_news_article.source = Some(article.source.clone());
             awful_news_article.content = Some(article.content.clone());
+
+            awful_news_article.namedEntities = awful_news_article
+                .namedEntities
+                .into_iter()
+                .unique_by(|e| e.name.clone())
+                .collect::<Vec<NamedEntity>>();
+            awful_news_article.importantDates = awful_news_article
+                .importantDates
+                .into_iter()
+                .unique_by(|e| e.descriptionOfWhyDateIsRelevant.clone())
+                .collect::<Vec<ImportantDate>>();
+            awful_news_article.importantTimeframes = awful_news_article
+                .importantTimeframes
+                .into_iter()
+                .unique_by(|e| e.descriptionOfWhyTimeFrameIsRelevant.clone())
+                .collect::<Vec<ImportantTimeframe>>();
+            awful_news_article.keyTakeAways = awful_news_article
+                .keyTakeAways
+                .into_iter()
+                .unique()
+                .collect::<Vec<String>>();
+
             front_page.articles.push(awful_news_article);
 
             let json = serde_json::to_string(&front_page).unwrap();
@@ -199,7 +221,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             fs::create_dir_all(&full_json_dir).await?;
 
-            let output_json_filename = if front_page.time_of_day == "evening" && (today >= midnight) {
+            let output_json_filename = if front_page.time_of_day == "evening" && (today >= midnight)
+            {
                 format!("{}/{}.json", full_json_dir, yesterday.to_string())
             } else {
                 format!("{}/{}.json", full_json_dir, front_page.time_of_day)
@@ -222,16 +245,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let markdown = front_page_to_markdown(&front_page);
 
     let output_markdown_filename = if front_page.time_of_day == "evening" && (today >= midnight) {
-        format!("{}/{}_{}.md", args.markdown_output_dir, front_page.local_date, yesterday.to_string())
+        format!(
+            "{}/{}_{}.md",
+            args.markdown_output_dir,
+            front_page.local_date,
+            yesterday.to_string()
+        )
     } else {
-        format!("{}/{}_{}.md", args.markdown_output_dir, front_page.local_date, front_page.time_of_day)
+        format!(
+            "{}/{}_{}.md",
+            args.markdown_output_dir, front_page.local_date, front_page.time_of_day
+        )
     };
-    
+
     fs::write(&output_markdown_filename, markdown).await?;
 
     println!("Wrote FrontPage to {}", output_markdown_filename);
 
-    let _res = update_date_toc_file(&args.markdown_output_dir, &front_page, &output_markdown_filename).await?;
+    let _res = update_date_toc_file(
+        &args.markdown_output_dir,
+        &front_page,
+        &output_markdown_filename,
+    )
+    .await?;
 
     let elapsed = start_time.elapsed();
     println!(
@@ -415,8 +451,7 @@ async fn update_date_toc_file(
     writeln!(
         toc_md,
         "- [{}](./{})",
-        front_page.time_of_day,
-        markdown_filename
+        front_page.time_of_day, markdown_filename
     )
     .unwrap();
 
