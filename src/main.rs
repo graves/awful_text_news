@@ -454,7 +454,7 @@ async fn update_date_toc_file(
     writeln!(
         toc_md,
         "- [{}](./{})",
-        front_page.time_of_day, markdown_filename
+        upcase(&front_page.time_of_day), markdown_filename
     )
     .unwrap();
 
@@ -478,4 +478,12 @@ async fn update_date_toc_file(
 
     println!("Updated TOC file at {}", toc_path);
     Ok(())
+}
+
+fn upcase(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+    }
 }
