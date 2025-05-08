@@ -265,7 +265,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let _res = update_date_toc_file(
         &args.markdown_output_dir,
         &front_page,
-        &output_markdown_filename,
+        &format!(
+            "{}_{}.md",
+            front_page.local_date, front_page.time_of_day
+        )
     )
     .await?;
 
