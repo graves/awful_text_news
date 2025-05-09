@@ -2,6 +2,13 @@
 name = "awful_text_news"
 version = "0.1.6"
 edition = "2024"
+authors = ["Thomas Gentry <thomas@awfulsec.com>"]
+description = "Summarize newspaper articles from sources that publish text-only or lite versions of their stories."
+license = "MIT"
+repository = "https://github.com/graves/awful_text_news.git"
+readme = "README.md"
+homepage = "https://github.com/graves/awful_text_news"
+keywords = ["openai", "qwen2.5", "cli", "markdown", "mdBook"]
 
 [dependencies]
 awful_aj = { version = "*", git = "https://github.com/graves/awful_aj" }
