@@ -18,9 +18,15 @@
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ```
 
-Awful Text News uses the [awful_aj](https://github.com/graves/awful_aj) OpenAI-compatible API client library to summarize newspaper articles from sources that publish text-only or _lite_ versions of their stories.
+Awful Text News uses the [aj](https://github.com/graves/awful_aj) OpenAI-compatible API client library to summarize newspaper articles from sources that publish text-only or _lite_ versions of their stories. `awful_text_news` will then write the files to an [mdBook](https://github.com/rust-lang/mdBook) project, updating all necessary files to add a new _Edition_, which is what we call the output of a single execution.
 
-**awful_aj** supports _"Tool use"_ which allows us to specify a JSON Schema that the LLM will conform to. This is specified in a template file. An example file is available [here](./news_parser.yaml). You can specify the conversation's options in a configuration file. It must be `yaml` and an example is available [here](./config.yaml).
+**aj** supports _"Tool use"_ which allows us to specify a JSON Schema that the LLM will conform to. This is specified in a template file. An example file is available [here](./news_parser.yaml). You can specify the conversation's options in a configuration file. It must be `yaml` and an example is available [here](./config.yaml).
+
+You can see a current working implementation at [news.awfulsec.com](https://news.awfulsec.com).
+
+An API example is available at [news.awfulsec.com/api/2025-05-08/morning.json](https://news.awfulsec.com/api/2025-05-08/morning.json).
+
+[news.awfulsec.com/api](https://news.awfulsec.com/api) provides a path for each day the project was executed with the edition name as the `json` file.
 
 ## Installation
 
@@ -35,14 +41,15 @@ conda install -c conda-forge python=3.11.0
 conda install pytorch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 -c pytorch
 ```
 
-Add the Pytorch libraries to your load path.
+Add the Pytorch libraries to your load path and instruct `sys-torch` to use Pytorch with an env variable.
 
 ```sh
 export LIBTORCH=$HOME/miniconda3/lib/python3.11/site-packages/torch
 export LD_LIBRARY_PATH=${LIBTORCH}/lib:$LD_LIBRARY_PATH
+export LIBTORCH_USE_PYTORCH=1
 ```
 
-*Note: LD_LIBRARY_PATH is DYLD_LIBRARY_PATH_ on MacOS*
+*Note: LD_LIBRARY_PATH is DYLD_LIBRARY_PATH on MacOS*
 
 ```sh
 cargo install awful_text_news
@@ -55,11 +62,11 @@ The important configuration options in `config.yaml` to adjust are:
 - `api_base`: The URL where your OpenAI-compatible API is located. _Default setups require the `/v1` at the end.
 - `model`: This specifies the LLM to use. This project was built using [Qwen_Qwen2.5-3B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct). The JSON Schema was adjusted until the model was able to output a mostly consistent representation of the data I was looking for. Experimentation with other models is highly recommended. Please let me know your experience if you do.
 
-The rest of the configuration options can be safely ignored as they are specific to `awful_aj`'s vector store support that allows details of the conversation to be recalled once they are no longer in the context window. This project relies on one-shot instructions.
+The rest of the configuration options can be safely ignored as they are specific to `aj`'s vector store support that allows details of the conversation to be recalled once they are no longer in the context window. This project relies on one-shot instructions.
 
 The `news_parser.yaml` is a template file that specifies the system prompt, along with counterfeit user and assistant messages to guide the LLM into a style of correspondence or restrict output to a format. I found including at least one example of what I actually expect the output to be, greatly improves the results.
 
-The application expects `config.yaml` to be in `com.awful-sec.aj` in your platform's system configuration directory, or `XDG_DIR` in linux, and `news_parser.yaml` to be in a subdirectory named `templates`.
+The application expects `config.yaml` to be in `com.awful-sec.aj` in your platform's system configuration directory on MacOS, or `$XDG_DIR` in linux, and `news_parser.yaml` to be in a subdirectory named `templates`.
 
 ```sh
 λ tree `/Users/tg/Library/Application Support/com.awful-sec.aj`
