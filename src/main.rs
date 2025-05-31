@@ -248,6 +248,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 format!("{}/{}", args.json_output_dir, front_page.local_date)
             };
 
+            println!("🛠 About to create: {}", full_json_dir);
+
             fs::create_dir_all(&full_json_dir).await?;
 
             let output_json_filename = if front_page.time_of_day == "evening" && (today >= midnight)
@@ -256,6 +258,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             } else {
                 format!("{}/{}.json", full_json_dir, front_page.time_of_day)
             };
+
+            println!("📝 Writing JSON to: {}", output_json_filename);
 
             fs::write(&output_json_filename, json).await?;
             if processed_count == 0 {
