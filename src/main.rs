@@ -336,14 +336,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
 /// # Returns
 /// * `String` - "morning", "afternoon", or "evening"
 pub fn time_of_day() -> String {
-    let morning_low = NaiveTime::from_hms_opt(4, 00, 0).unwrap();
-    let morning_high = NaiveTime::from_hms_opt(12, 00, 0).unwrap();
+    let morning_low = NaiveTime::from_hms_opt(0, 00, 0).unwrap();
+    let morning_high = NaiveTime::from_hms_opt(8, 00, 0).unwrap();
 
-    let afternoon_low = NaiveTime::from_hms_opt(12, 00, 0).unwrap();
-    let afternoon_high = NaiveTime::from_hms_opt(8, 00, 0).unwrap();
+    let afternoon_low = NaiveTime::from_hms_opt(8, 00, 0).unwrap();
+    let afternoon_high = NaiveTime::from_hms_opt(16, 00, 0).unwrap();
 
-    let _evening_low = NaiveTime::from_hms_opt(8, 00, 0).unwrap();
-    let _evening_high = NaiveTime::from_hms_opt(4, 00, 0).unwrap();
+    let _evening_low = NaiveTime::from_hms_opt(16, 00, 0).unwrap();
+    let _evening_high = NaiveTime::from_hms_opt(0, 00, 0).unwrap();
 
     let time_of_day = Local::now().time();
 
