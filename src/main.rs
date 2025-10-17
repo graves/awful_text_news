@@ -150,17 +150,45 @@ async fn main() -> Result<(), Box<dyn Error>> {
         npr_page_url
     );
 
-    // Independently fetch each article from CNN
-    let cnn_articles: Vec<NewsArticle> = stream::iter(cnn_article_urls)
-        .filter_map(|url: String| async move { fetch_cnn_article(&url).await.unwrap() })
+    // Fetch and process articles from CNN (hardened)
+    let cnn_articles: Vec<NewsArticle> = stream::iter(cnn_article_urls.clone())
+        .then(|url: String| async move {
+            match fetch_cnn_article(&url).await {
+                Ok(Some(article)) => Some(article),
+                Ok(None) => {
+                    eprintln!("[WARN] CNN fetch produced no content: {url}");
+                    None
+                }
+                Err(e) => {
+                    eprintln!("[ERROR] CNN fetch failed for {url}: {e}");
+                    None
+                }
+            }
+        })
+        .filter(|opt| std::future::ready(opt.is_some()))
+        .map(|opt| opt.unwrap())
         .collect()
         .await;
 
     println!("Fetched {} article contents from CNN", cnn_articles.len());
 
-    // Independently fetch each article from NPR
-    let npr_articles: Vec<NewsArticle> = stream::iter(npr_article_urls)
-        .filter_map(|url: String| async move { fetch_npr_article(&url).await.unwrap() })
+    // Fetch and process articles from NPR (hardened)
+    let npr_articles: Vec<NewsArticle> = stream::iter(npr_article_urls.clone())
+        .then(|url: String| async move {
+            match fetch_npr_article(&url).await {
+                Ok(Some(article)) => Some(article),
+                Ok(None) => {
+                    eprintln!("[WARN] NPR fetch produced no content: {url}");
+                    None
+                }
+                Err(e) => {
+                    eprintln!("[ERROR] NPR fetch failed for {url}: {e}");
+                    None
+                }
+            }
+        })
+        .filter(|opt| std::future::ready(opt.is_some()))
+        .map(|opt| opt.unwrap())
         .collect()
         .await;
 
@@ -183,91 +211,133 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let local_time = Local::now().time().to_string();
     let mut front_page = FrontPage {
         time_of_day: time_of_day(),
-        local_time: local_time,
-        local_date: local_date,
+        local_time,
+        local_date,
         articles: Vec::new(),
     };
 
-    // Process each article and generate JSON/API file
+    // Process each article and generate JSON/API file (hardened)
     let mut processed_count = 0;
-    for article in &articles {
+
+    for (i, article) in articles.iter().enumerate() {
         // Ask the API to analyze this article
-        let response_json = ask_with_backoff(&config, &article.content.clone(), &template).await?;
-        let awful_news_article: Result<AwfulNewsArticle, serde_json::Error> =
-            serde_json::from_str(&response_json);
+        match ask_with_backoff(&config, &article.content, &template).await {
+            Ok(response_json) => {
+                // Try to deserialize model output
+                match serde_json::from_str::<AwfulNewsArticle>(&response_json) {
+                    Ok(mut awful_news_article) => {
+                        // Populate source and content
+                        awful_news_article.source = Some(article.source.clone());
+                        awful_news_article.content = Some(article.content.clone());
 
-        if awful_news_article.is_ok() {
-            let mut awful_news_article = awful_news_article.unwrap();
-            // Populate source and content
-            awful_news_article.source = Some(article.source.clone());
-            awful_news_article.content = Some(article.content.clone());
+                        // Deduplicate fields
+                        awful_news_article.namedEntities = awful_news_article
+                            .namedEntities
+                            .into_iter()
+                            .unique_by(|e| e.name.clone())
+                            .collect::<Vec<NamedEntity>>();
+                        awful_news_article.importantDates = awful_news_article
+                            .importantDates
+                            .into_iter()
+                            .unique_by(|e| e.descriptionOfWhyDateIsRelevant.clone())
+                            .collect::<Vec<ImportantDate>>();
+                        awful_news_article.importantTimeframes = awful_news_article
+                            .importantTimeframes
+                            .into_iter()
+                            .unique_by(|e| e.descriptionOfWhyTimeFrameIsRelevant.clone())
+                            .collect::<Vec<ImportantTimeframe>>();
+                        awful_news_article.keyTakeAways = awful_news_article
+                            .keyTakeAways
+                            .into_iter()
+                            .unique()
+                            .collect::<Vec<String>>();
 
-            // Deduplicate entities and timeframes to avoid redundancy
-            awful_news_article.namedEntities = awful_news_article
-                .namedEntities
-                .into_iter()
-                .unique_by(|e| e.name.clone())
-                .collect::<Vec<NamedEntity>>();
-            awful_news_article.importantDates = awful_news_article
-                .importantDates
-                .into_iter()
-                .unique_by(|e| e.descriptionOfWhyDateIsRelevant.clone())
-                .collect::<Vec<ImportantDate>>();
-            awful_news_article.importantTimeframes = awful_news_article
-                .importantTimeframes
-                .into_iter()
-                .unique_by(|e| e.descriptionOfWhyTimeFrameIsRelevant.clone())
-                .collect::<Vec<ImportantTimeframe>>();
-            awful_news_article.keyTakeAways = awful_news_article
-                .keyTakeAways
-                .into_iter()
-                .unique()
-                .collect::<Vec<String>>();
+                        // Add to front page
+                        front_page.articles.push(awful_news_article);
 
-            // Add to front page
-            front_page.articles.push(awful_news_article);
+                        // Generate JSON output based on time of day
+                        let json = match serde_json::to_string(&front_page) {
+                            Ok(j) => j,
+                            Err(e) => {
+                                eprintln!(
+                                    "[ERROR] Failed to serialize FrontPage after article #{i}: {e}"
+                                );
+                                processed_count += 1;
+                                println!(
+                                    "Processed {}/{} articles",
+                                    processed_count,
+                                    articles.len()
+                                );
+                                continue;
+                            }
+                        };
 
-            // Generate JSON output based on time of day
-            let json = serde_json::to_string(&front_page).unwrap();
+                        let midnight = NaiveTime::from_hms_opt(23, 59, 59).unwrap();
+                        let today = Local::now().time();
+                        let yesterday = today - Duration::days(1);
 
-            let midnight = NaiveTime::from_hms_opt(23, 59, 59).unwrap();
-            let today = Local::now().time();
-            let yesterday = today - Duration::days(1);
+                        let api_file_dir =
+                            if front_page.time_of_day == "evening" && (today >= midnight) {
+                                yesterday.to_string()
+                            } else {
+                                front_page.local_date.clone()
+                            };
 
-            let api_file_dir = if front_page.time_of_day == "evening" && (today >= midnight) {
-                format!("{}", yesterday.to_string())
-            } else {
-                format!("{}", front_page.local_date)
-            };
+                        // Ensure output dirs exist
+                        if let Err(e) = fs::create_dir_all(&api_file_dir).await {
+                            eprintln!("[ERROR] Failed to create dir {api_file_dir}: {e}");
+                        }
 
-            fs::create_dir_all(&api_file_dir).await?;
+                        let full_json_dir =
+                            if front_page.time_of_day == "evening" && (today >= midnight) {
+                                format!("{}/{}", args.json_output_dir, yesterday.to_string())
+                            } else {
+                                format!("{}/{}", args.json_output_dir, front_page.local_date)
+                            };
 
-            let full_json_dir = if front_page.time_of_day == "evening" && (today >= midnight) {
-                format!("{}/{}", args.json_output_dir, yesterday.to_string())
-            } else {
-                format!("{}/{}", args.json_output_dir, front_page.local_date)
-            };
+                        println!("🛠 About to create: {}", &full_json_dir);
+                        if let Err(e) = fs::create_dir_all(&full_json_dir).await {
+                            eprintln!("[ERROR] Failed to create dir {full_json_dir}: {e}");
+                        }
 
-            println!("🛠 About to create: {}", full_json_dir);
+                        let output_json_filename =
+                            if front_page.time_of_day == "evening" && (today >= midnight) {
+                                format!("{}/{}.json", full_json_dir, yesterday.to_string())
+                            } else {
+                                format!("{}/{}.json", full_json_dir, front_page.time_of_day)
+                            };
 
-            fs::create_dir_all(&full_json_dir).await?;
+                        println!("📝 Writing JSON to: {}", output_json_filename);
 
-            let output_json_filename = if front_page.time_of_day == "evening" && (today >= midnight)
-            {
-                format!("{}/{}.json", full_json_dir, yesterday.to_string())
-            } else {
-                format!("{}/{}.json", full_json_dir, front_page.time_of_day)
-            };
-
-            println!("📝 Writing JSON to: {}", output_json_filename);
-
-            fs::write(&output_json_filename, json).await?;
-            if processed_count == 0 {
-                println!("Wrote JSON API file to {}", output_json_filename);
+                        if let Err(e) = fs::write(&output_json_filename, json).await {
+                            eprintln!(
+                                "[ERROR] Failed writing JSON file {output_json_filename}: {e}"
+                            );
+                        } else if processed_count == 0 {
+                            println!("Wrote JSON API file to {}", output_json_filename);
+                        }
+                    }
+                    Err(e) => {
+                        // The most common failure you saw: server returned an error object (e.g., { status: 400, ... })
+                        // which doesn’t match AwfulNewsArticle schema.
+                        eprintln!(
+                            "[WARN] Skipping article #{i}: model returned non-conforming JSON: {e}\n\
+                         [DEBUG] First 300 chars of response: {}",
+                            truncate_for_log(&response_json, 300)
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                // Harden: do NOT crash the service; just skip this article
+                eprintln!(
+                    "[ERROR] API call failed for article #{i} (source={}): {e}",
+                    article.source
+                );
             }
         }
 
-        // Print progress
+        // Progress
         processed_count += 1;
         println!("Processed {}/{} articles", processed_count, articles.len());
     }
@@ -329,6 +399,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
 
     Ok(())
+}
+
+fn truncate_for_log(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…(+{} bytes)", &s[..max], s.len() - max)
+    }
 }
 
 /// Determine the time of day based on current local time
@@ -777,54 +855,35 @@ async fn update_daily_news_index(
     Ok(())
 }
 
+use rand::{Rng, thread_rng}; // if you don't want a new dep, remove jitter (see comment below)
 use std::fmt;
-use std::time::SystemTime; // For backoff timing
+use std::time::Duration as StdDuration;
+use tokio::time::sleep;
 
-// 1. Define `TryInterval` for exponential backoff
-pub trait TryInterval {
-    fn next(&mut self) -> Result<Duration, Box<dyn Error>>;
-}
-
-// 2. Implement exponential backoff with a base delay
-struct ExponentialBackoff {
-    base_delay: Duration,
-}
-impl TryInterval for ExponentialBackoff {
-    fn next(&mut self) -> Result<Duration, Box<dyn Error>> {
-        let now = SystemTime::now();
-        let elapsed = now
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default();
-
-        // If no error, return a delay (e.g., for initial attempt)
-        if elapsed.as_secs() < 1 {
-            return Ok(self.base_delay);
-        }
-
-        // Otherwise, compute exponential backoff
-        let delay = self.base_delay * 2;
-        if delay > Duration::new(30, 0).unwrap() {
-            return Err("Maximum backoff reached".into()); // Cap maximum backoff
-        }
-
-        Ok(delay)
-    }
-}
-
-// 3. Define `AskAsync` trait with retry logic
+// AskAsync + RetryAsk (async, non-blocking, exponential backoff with jitter)
 pub trait AskAsync {
     type Response;
     async fn ask(&self, text: &str) -> Result<Self::Response, Box<dyn Error>>;
 }
 
-// 4. Implement retry logic for `ask`
-pub struct RetryAsk<T>(T, usize, Duration);
+pub struct RetryAsk<T> {
+    inner: T,
+    max_retries: usize,
+    base_delay: StdDuration,
+    max_delay: StdDuration,
+}
+
 impl<T> RetryAsk<T>
 where
     T: AskAsync,
 {
-    pub fn new(inner: T, max_retries: usize, delay: Duration) -> Self {
-        RetryAsk(inner, max_retries, delay)
+    pub fn new(inner: T, max_retries: usize, base_delay: StdDuration) -> Self {
+        Self {
+            inner,
+            max_retries,
+            base_delay,
+            max_delay: StdDuration::from_secs(30),
+        }
     }
 }
 
@@ -835,28 +894,36 @@ where
     type Response = T::Response;
 
     async fn ask(&self, text: &str) -> Result<Self::Response, Box<dyn Error>> {
-        let mut retries = 0;
+        let mut attempt = 0;
 
-        while retries < self.1 {
-            match self.0.ask(text).await {
-                Ok(response) => return Ok(response),
+        loop {
+            match self.inner.ask(text).await {
+                Ok(resp) => return Ok(resp),
                 Err(e) => {
-                    eprintln!("Error: {e}");
-                    if retries < self.1 - 1 {
-                        let delay = if self.2.is_zero() {
-                            Duration::new(1, 0).unwrap()
-                        } else {
-                            self.2 * (retries + 1).pow(2).try_into().unwrap()
-                        };
-                        std::thread::sleep(delay.to_std().unwrap());
-                    } else {
+                    attempt += 1;
+                    if attempt > self.max_retries {
+                        // Final failure
                         return Err(e);
                     }
-                    retries += 1;
+
+                    // Exponential backoff: base * 2^(attempt-1), capped
+                    let mut delay = self.base_delay.saturating_mul(1 << (attempt - 1));
+                    if delay > self.max_delay {
+                        delay = self.max_delay;
+                    }
+
+                    // Optional jitter (remove this block if you want no extra dependency on `rand`)
+                    let jitter_ms: u64 = thread_rng().gen_range(0..=250);
+                    let delay = delay + StdDuration::from_millis(jitter_ms);
+
+                    eprintln!(
+                        "[WARN] ask() failed (attempt {}/{}): {} — backing off for {:?}",
+                        attempt, self.max_retries, e, delay
+                    );
+                    sleep(delay).await;
                 }
             }
         }
-        unreachable!("Max retries reached")
     }
 }
 
@@ -870,7 +937,7 @@ impl<'a> AskAsync for AskFnWrapper<'a> {
     type Response = String;
 
     async fn ask(&self, text: &str) -> Result<Self::Response, Box<dyn Error>> {
-        // Call the function from the dependency
+        // Call the function from the dependency (this may return an error if HTTP != 2xx)
         ask(self.config, text.to_string(), self.template, None, None).await
     }
 }
@@ -881,6 +948,6 @@ pub async fn ask_with_backoff(
     template: &ChatTemplate,
 ) -> Result<String, Box<dyn Error>> {
     let client = AskFnWrapper { config, template };
-    let api = RetryAsk::new(client, 5, Duration::new(1, 0).unwrap());
+    let api = RetryAsk::new(client, 5, StdDuration::from_secs(1));
     api.ask(article).await
 }
