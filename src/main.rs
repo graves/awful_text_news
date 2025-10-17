@@ -9,8 +9,10 @@ use itertools::Itertools;
 use reqwest::get;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::fmt::Write;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::time::Instant;
 use tokio::fs;
@@ -18,6 +20,12 @@ use tokio::io::AsyncWriteExt;
 use tracing::{debug, error, info, instrument, warn};
 use tracing_subscriber::{EnvFilter, fmt as tfmt};
 use url::Url;
+
+// Std FS for quarantine writes
+use std::fs as stdfs;
+use std::io::Write as IoWrite;
+
+// ===== CLI & Data types =====
 
 /// Main program to scrape and analyze news articles
 /// from CNN and NPR, outputting JSON/API files and markdown reports.
@@ -81,6 +89,8 @@ pub struct ImportantTimeframe {
     pub descriptionOfWhyTimeFrameIsRelevant: String,
 }
 
+// ===== Main =====
+
 #[tokio::main]
 #[instrument]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -100,6 +110,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Parse CLI
     let args = Cli::parse();
     debug!(?args.json_output_dir, ?args.markdown_output_dir, "Parsed CLI arguments");
+
+    // Early check: ensure JSON output dir is writable
+    if let Err(e) = ensure_writable_dir(&args.json_output_dir).await {
+        error!(
+            path = %args.json_output_dir,
+            error = %e,
+            "JSON output directory is not writable (fix perms or choose a different path)"
+        );
+        // Fail fast: we won't be able to write incremental JSON snapshots anyway.
+        return Err(e);
+    }
 
     // Base URLs
     let cnn_page_url = "https://lite.cnn.com";
@@ -224,9 +245,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
     for (i, article) in articles.iter().enumerate() {
         debug!(index = i, source = %article.source, "Analyzing article");
 
+        // First ask
         match ask_with_backoff(&config, &article.content, &template).await {
             Ok(response_json) => {
-                match serde_json::from_str::<AwfulNewsArticle>(&response_json) {
+                // Quarantine + meta
+                log_and_quarantine(i, &response_json);
+
+                // Try parse
+                let mut parsed = serde_json::from_str::<AwfulNewsArticle>(&response_json);
+
+                // If the parse failed due to EOF (truncation), re-ask ONCE
+                if let Err(ref e) = parsed {
+                    if looks_truncated(e) {
+                        warn!(index = i, error = %e, "EOF while parsing; re-asking once");
+                        match ask_with_backoff(&config, &article.content, &template).await {
+                            Ok(r2) => {
+                                log_and_quarantine(i, &r2);
+                                parsed = serde_json::from_str::<AwfulNewsArticle>(&r2);
+                            }
+                            Err(e2) => {
+                                warn!(index = i, error = %e2, "Re-ask failed; will skip article");
+                            }
+                        }
+                    }
+                }
+
+                match parsed {
                     Ok(mut awful_news_article) => {
                         awful_news_article.source = Some(article.source.clone());
                         awful_news_article.content = Some(article.content.clone());
@@ -279,16 +323,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         let now = Local::now().time();
                         let yesterday = now - Duration::days(1);
 
-                        let api_file_dir =
+                        let _api_file_dir =
                             if front_page.time_of_day == "evening" && (now >= midnight) {
                                 yesterday.to_string()
                             } else {
                                 front_page.local_date.clone()
                             };
-
-                        if let Err(e) = fs::create_dir_all(&api_file_dir).await {
-                            error!(%api_file_dir, error = %e, "Failed to create API dir");
-                        }
+                        // Note: we used to create a naked dir here; it wasn't used for writing.
+                        // We keep only the real output dir below.
 
                         let full_json_dir =
                             if front_page.time_of_day == "evening" && (now >= midnight) {
@@ -407,12 +449,43 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+// ===== Helpers =====
+
 fn truncate_for_log(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
         format!("{}…(+{} bytes)", &s[..max], s.len() - max)
     }
+}
+
+/// Save raw API response to ./_debug/responses with a stable-ish fingerprint.
+/// Always best-effort (errors ignored), but we log path + size.
+fn log_and_quarantine(index: usize, body: &str) {
+    if let Err(e) = stdfs::create_dir_all("./_debug/responses") {
+        warn!(error = %e, "Failed to create quarantine dir");
+        return;
+    }
+    let mut hasher = DefaultHasher::new();
+    body.hash(&mut hasher);
+    let fp = hasher.finish();
+    let path = format!("./_debug/responses/resp_{index}_{fp:016x}.json");
+    match stdfs::File::create(&path) {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(body.as_bytes()) {
+                warn!(path = %path, error = %e, "Failed to write quarantined response");
+            } else {
+                info!(index, path = %path, bytes = body.len(), "Quarantined raw API response");
+            }
+        }
+        Err(e) => warn!(path = %path, error = %e, "Failed to create quarantined response file"),
+    }
+}
+
+/// Classify serde_json error category to detect truncation/EOF.
+fn looks_truncated(e: &serde_json::Error) -> bool {
+    use serde_json::error::Category;
+    matches!(e.classify(), Category::Eof)
 }
 
 #[instrument]
@@ -755,7 +828,7 @@ async fn update_daily_news_index(
 
 // ===== Retry & API call wrappers with tracing and timing =====
 
-use rand::{Rng, rng};
+use rand::{Rng, thread_rng};
 use std::fmt;
 use std::time::Duration as StdDuration;
 use tokio::time::sleep;
@@ -843,7 +916,7 @@ where
                     if delay > self.max_delay {
                         delay = self.max_delay;
                     }
-                    let jitter_ms: u64 = rng().random_range(0..=250);
+                    let jitter_ms: u64 = thread_rng().gen_range(0..=250);
                     let delay = delay + StdDuration::from_millis(jitter_ms);
 
                     warn!(
@@ -907,4 +980,24 @@ pub async fn ask_with_backoff(
         }
     }
     res
+}
+
+// ===== IO guards =====
+
+/// Ensure a directory exists and is writable (create + touch + delete).
+#[instrument(level = "info", skip_all, fields(path = %path))]
+async fn ensure_writable_dir(path: &str) -> Result<(), Box<dyn Error>> {
+    if let Err(e) = fs::create_dir_all(path).await {
+        return Err(Box::new(e));
+    }
+    // Try a small sync write using std fs (simpler error surface)
+    let probe_path = format!("{}/.__probe_write__", path.trim_end_matches('/'));
+    match stdfs::File::create(&probe_path) {
+        Ok(_) => {
+            let _ = stdfs::remove_file(&probe_path);
+            info!("Output directory is writable");
+            Ok(())
+        }
+        Err(e) => Err(Box::new(e)),
+    }
 }
