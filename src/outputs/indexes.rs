@@ -52,13 +52,13 @@ pub async fn update_date_toc_file(
         for article in articles {
             let slug = slugify_title(&article.title);
             let source_tag = article.source_tag()
-                .map(|tag| format!(" &nbsp;&nbsp;&nbsp;&nbsp;<small>`{}`</small>", tag))
+                .map(|tag| format!(" <small>`{}`</small>", tag))
                 .unwrap_or_default();
             
             writeln!(
                 toc_md,
-                "\t\t- [{}]({}#{}){}",
-                article.title, markdown_filename, slug, source_tag
+                "\t\t- {} - [{}]({}#{})",
+                source_tag, article.title, markdown_filename, slug
             )
             .unwrap();
         }

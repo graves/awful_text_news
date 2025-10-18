@@ -10,46 +10,61 @@ pub fn front_page_to_markdown(front_page: &FrontPage) -> String {
     writeln!(md, "# Awful Times\n").unwrap();
     writeln!(md, "#### Edition published at {}\n", front_page.local_time).unwrap();
 
+    // Group articles by category
+    use std::collections::BTreeMap;
+    let mut articles_by_category: BTreeMap<String, Vec<&crate::models::AwfulNewsArticle>> = BTreeMap::new();
+    
     for article in &front_page.articles {
-        // Title with source tag
-        if let Some(tag) = article.source_tag() {
+        articles_by_category
+            .entry(article.category.clone())
+            .or_insert_with(Vec::new)
+            .push(article);
+    }
+
+    // Process each category in alphabetical order
+    for (category, articles) in articles_by_category {
+        writeln!(md, "# {}\n", category).unwrap();
+
+        for article in articles {
+            // Title with source tag
+            if let Some(tag) = article.source_tag() {
+                writeln!(
+                    md,
+                    "## {} &nbsp;&nbsp;&nbsp;&nbsp;<small>`{}`</small>\n",
+                    article.title, tag
+                )
+                .unwrap();
+            } else {
+                writeln!(md, "## {}\n", article.title).unwrap();
+            }
+
+            // Source link
+            if let Some(source) = &article.source {
+                writeln!(md, "- [source]({})", source).unwrap();
+            }
+
+            // Publication date/time
             writeln!(
                 md,
-                "## {} &nbsp;&nbsp;&nbsp;&nbsp;<small>`{}`</small>\n",
-                article.title, tag
+                "- _Published: {} {}_",
+                article.dateOfPublication, article.timeOfPublication
             )
             .unwrap();
-        } else {
-            writeln!(md, "## {}\n", article.title).unwrap();
-        }
 
-        // Source link
-        if let Some(source) = &article.source {
-            writeln!(md, "- [source]({})", source).unwrap();
-        }
+            // Category
+            writeln!(md, "- **{}**", article.category).unwrap();
 
-        // Publication date/time
-        writeln!(
-            md,
-            "- _Published: {} {}_",
-            article.dateOfPublication, article.timeOfPublication
-        )
-        .unwrap();
+            // Tags
+            if !article.tags.is_empty() {
+                let tags_str = article.tags.join(", ");
+                writeln!(md, "- <small>tags: `{}`</small>\n", tags_str).unwrap();
+            } else {
+                writeln!(md).unwrap();
+            }
 
-        // Category
-        writeln!(md, "- **{}**", article.category).unwrap();
-
-        // Tags
-        if !article.tags.is_empty() {
-            let tags_str = article.tags.join(", ");
-            writeln!(md, "- <small>tags: `{}`</small>\n", tags_str).unwrap();
-        } else {
-            writeln!(md).unwrap();
-        }
-
-        // Summary
-        writeln!(md, "### Summary\n").unwrap();
-        writeln!(md, "{}\n", article.summaryOfNewsArticle.trim()).unwrap();
+            // Summary
+            writeln!(md, "### Summary\n").unwrap();
+            writeln!(md, "{}\n", article.summaryOfNewsArticle.trim()).unwrap();
 
         if !article.keyTakeAways.is_empty() {
             writeln!(md, "### Key Takeaways").unwrap();
@@ -97,7 +112,8 @@ pub fn front_page_to_markdown(front_page: &FrontPage) -> String {
             writeln!(md).unwrap();
         }
 
-        writeln!(md, "---\n").unwrap();
+            writeln!(md, "---\n").unwrap();
+        }
     }
 
     debug!(chars = md.len(), "Rendered Markdown length");
