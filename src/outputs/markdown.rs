@@ -30,8 +30,8 @@ pub fn front_page_to_markdown(front_page: &FrontPage) -> String {
             if let Some(tag) = article.source_tag() {
                 writeln!(
                     md,
-                    "## {} &nbsp;&nbsp;&nbsp;&nbsp;<small>`{}`</small>\n",
-                    article.title, tag
+                    "## <small>`{}`</small> - {}\n",
+                    tag, article.title
                 )
                 .unwrap();
             } else {
