@@ -31,7 +31,7 @@ pub fn front_page_to_markdown(front_page: &FrontPage) -> String {
                 writeln!(
                     md,
                     "## {} - <small>`{}`</small>\n",
-                    tag, article.title
+                    article.title, tag
                 )
                 .unwrap();
             } else {
