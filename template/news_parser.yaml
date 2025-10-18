@@ -1,0 +1,110 @@
+system_prompt: You are Qwen, created by Alibaba Cloud.
+messages: []
+response_format:
+  name: article_summarizer
+  strict: true
+  description: Represents a summarized news article.
+  schema:
+    type: object
+    properties:
+      title:
+        type: string
+      dateOfPublication:
+        type: string
+        format: date
+      timeOfPublication:
+        type: string
+        format: time
+      category:
+        type: string
+        description: Primary category of the news article.
+        enum:
+          - Politics & Governance
+          - Economy & Business
+          - Law & Justice
+          - Conflict & War
+          - Environment & Climate
+          - Science & Technology
+          - Health & Public Safety
+          - Society & Culture
+          - Human Rights & Immigration
+          - Special Interest / Other
+      summaryOfNewsArticle:
+        type: string
+      namedEntities:
+        type: array
+        items:
+          type: object
+          properties:
+            name:
+              type: string
+              description: Name of entity.
+            whatIsThisEntity:
+              type: string
+              description: Explanation of how this entity is relevant to the world.
+            whyIsThisEntityRelevantToTheArticle:
+              type: string
+              description: Explanation of why this named entity is relevant to the article.
+          required:
+            - name
+            - whatIsThisEntity
+            - whyIsThisEntityRelevantToTheArticle
+      keyTakeAways:
+        type: array
+        items:
+          type: string
+      importantDates:
+        type: array
+        items:
+          type: object
+          properties:
+            dateMentionedInArticle:
+              type: string
+              format: date
+            descriptionOfWhyDateIsRelevant:
+              type: string
+          required:
+            - dateMentionedInArticle
+            - descriptionOfWhyDateIsRelevant
+      importantTimeframes:
+        type: array
+        items:
+          type: object
+          properties:
+            approximateTimeFrameStart:
+              type: string
+            approximateTimeFrameEnd:
+              type: string
+            descriptionOfWhyTimeFrameIsRelevant:
+              type: string
+          required:
+            - approximateTimeFrameStart
+            - approximateTimeFrameEnd
+            - descriptionOfWhyTimeFrameIsRelevant
+      tags:
+        type: array
+        description: A collection of tags to index the article in search.
+        items:
+          type: string
+    required:
+      - title
+      - dateOfPublication
+      - timeOfPublication
+      - category
+      - summaryOfNewsArticle
+      - namedEntities
+      - keyTakeAways
+      - importantDates
+      - importantTimeframes
+      - tags
+pre_user_message_content: |-
+  Please read the following news article and extract all of the key elements verbatim. To extract the key elements and summarize, follow these steps:
+  1. Identify all named entities.
+  2. Write a sentence describing why this entity is relevant to the world outside of the article.
+  3. Write a sentence describing how this entity is relevant to the article.
+  4. Compile the key information points and create a summary paragraph.
+  5. Generate the final JSON object.
+  6. Read final JSON object and ensure there are no duplicate values.
+  7. Review format of JSON Object to ensure correctness.
+  8. Output JSON object.
+post_user_message_content:
