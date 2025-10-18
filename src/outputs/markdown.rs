@@ -164,7 +164,7 @@ mod tests {
         };
 
         let md = front_page_to_markdown(&frontpage);
-        assert!(md.contains("## Test Article"));
+        assert!(md.contains("## <small>`example`</small> - Test Article"));
         assert!(md.contains("`example`"));  // source tag
         assert!(md.contains("**Science & Technology**"));  // category
         assert!(md.contains("tags: `tech, science`"));  // tags
