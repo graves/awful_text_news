@@ -30,7 +30,7 @@ pub fn front_page_to_markdown(front_page: &FrontPage) -> String {
             if let Some(tag) = article.source_tag() {
                 writeln!(
                     md,
-                    "## <small>`{}`</small> - {}\n",
+                    "## {} - <small>`{}`</small>\n",
                     tag, article.title
                 )
                 .unwrap();
@@ -164,7 +164,7 @@ mod tests {
         };
 
         let md = front_page_to_markdown(&frontpage);
-        assert!(md.contains("## <small>`example`</small> - Test Article"));
+        assert!(md.contains("## Test Article - <small>`example`</small>"));
         assert!(md.contains("`example`"));  // source tag
         assert!(md.contains("**Science & Technology**"));  // category
         assert!(md.contains("tags: `tech, science`"));  // tags

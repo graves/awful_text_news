@@ -47,7 +47,8 @@ pub async fn update_date_toc_file(
 
     // Write articles organized by category (alphabetically)
     for (category, articles) in articles_by_category {
-        writeln!(toc_md, "\t- **{}**", category).unwrap();
+        let category_slug = slugify_title(&category);
+        writeln!(toc_md, "\t- [**{}**]({}#{})", category, markdown_filename, category_slug).unwrap();
         
         for article in articles {
             let slug = slugify_title(&article.title);
