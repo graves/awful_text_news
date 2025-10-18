@@ -11,7 +11,6 @@ use tracing::{debug, error, info, instrument, warn};
 use chrono::{DateTime, FixedOffset};
 use serde::Deserialize;
 
-// (Optional) You can add default headers here if needed; UA + timeouts are already set.
 static CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::builder()
         .user_agent(concat!(
@@ -41,11 +40,23 @@ pub async fn index_articles() -> Result<Vec<String>, Box<dyn Error>> {
         let res = CLIENT.get(*section).send().await?;
         let final_url = res.url().to_string(); // after potential redirects
         let html = res.text().await?;
+
+        // Detect interstitials / JS shells that often break selectors
+        if html.to_lowercase().contains("enable javascript")
+            || html.contains("consent")
+            || html.contains("unusual traffic")
+            || html.contains("arc-sw.js")
+        {
+            warn!(section = *section, "Page may be a JS shell / interstitial; fallbacks will be used.");
+        }
+
         let document = Html::parse_document(&html);
 
         // 1) Primary selectors commonly present on section pages
         let sel_title_link = Selector::parse(r#"a[data-testid="TitleLink"][href]"#).unwrap();
         let sel_heading_link = Selector::parse(r#"a[data-testid="Heading"][href]"#).unwrap();
+        // Extra: some builds use a generic "Link" testid
+        let sel_card_link = Selector::parse(r#"a[data-testid="Link"][href]"#).unwrap();
         let sel_generic_cards = Selector::parse(r#"article a[href]"#).unwrap();
 
         let mut urls = Vec::<String>::new();
@@ -53,6 +64,9 @@ pub async fn index_articles() -> Result<Vec<String>, Box<dyn Error>> {
         harvest_selector(&document, &sel_title_link, &mut urls);
         if urls.len() < 10 {
             harvest_selector(&document, &sel_heading_link, &mut urls);
+        }
+        if urls.len() < 10 {
+            harvest_selector(&document, &sel_card_link, &mut urls);
         }
         if urls.len() < 10 {
             harvest_selector(&document, &sel_generic_cards, &mut urls);
@@ -70,7 +84,7 @@ pub async fn index_articles() -> Result<Vec<String>, Box<dyn Error>> {
             }
         }
 
-        // 3) Regex fallback for article-shaped hrefs (date-tailed slugs)
+        // 3) Regex fallback for article-shaped hrefs (yyyy-mm-dd in slug)
         if urls.len() < 10 {
             let mut from_regex = harvest_regex_fallback(&html);
             from_regex.retain(|u| is_target_vertical(u));
@@ -78,6 +92,25 @@ pub async fn index_articles() -> Result<Vec<String>, Box<dyn Error>> {
                 if urls.len() >= 10 { break; }
                 if !urls.contains(&u) {
                     urls.push(u);
+                }
+            }
+        }
+
+        // 4) Very liberal final sweep over any <a href>, requiring a date in path
+        if urls.len() < 10 {
+            let sel_any_a = Selector::parse(r#"a[href]"#).unwrap();
+            let re_date = regex::Regex::new(r"/20\d{2}-\d{2}-\d{2}").unwrap();
+
+            for a in document.select(&sel_any_a) {
+                if let Some(href) = a.value().attr("href") {
+                    if let Some(mut u) = normalize_reuters_link(href) {
+                        // strip query/fragment for stable dedupe
+                        if let Some(i) = u.find(['?', '#']) { u.truncate(i); }
+                        if is_target_vertical(&u) && re_date.is_match(&u) && !urls.contains(&u) {
+                            urls.push(u);
+                            if urls.len() >= 10 { break; }
+                        }
+                    }
                 }
             }
         }
@@ -103,7 +136,9 @@ fn harvest_selector(document: &Html, sel: &Selector, urls: &mut Vec<String>) {
             break;
         }
         if let Some(href) = a.value().attr("href") {
-            if let Some(url) = normalize_reuters_link(href) {
+            if let Some(mut url) = normalize_reuters_link(href) {
+                // strip query/hash
+                if let Some(i) = url.find(['?', '#']) { url.truncate(i); }
                 if is_target_vertical(&url) && !urls.contains(&url) {
                     urls.push(url);
                 }
@@ -164,23 +199,32 @@ fn collect_urls_from_ldjson_value(v: &serde_json::Value, out: &mut Vec<String>) 
     }
 }
 
-/// Regex fallback for article-shaped hrefs like “…-2025-10-17/”
+/// Regex fallback for article-shaped hrefs (yyyy-mm-dd anywhere in path; no trailing slash required)
 fn harvest_regex_fallback(html: &str) -> Vec<String> {
+    use regex::Regex;
     let mut out = Vec::<String>::new();
-    // capture relative or absolute links that end with a date-y slug; keep it simple but effective
-    let re = regex::Regex::new(r#""(https?://www\.reuters\.com/[^"]+|/[^"]+)""#).unwrap();
-    for cap in re.captures_iter(html) {
-        let href = cap.get(1).unwrap().as_str();
-        if (href.contains("/world/") || href.contains("/sustainability/") || href.contains("/technology/"))
-            && href.contains("-20")
-            && href.ends_with('/')
-        {
-            if let Some(u) = normalize_reuters_link(href) {
+
+    // Grab quoted href-like values (absolute or relative)
+    let re_href = Regex::new(r#""(https?://www\.reuters\.com/[^\s"']+|/[^\s"']+)""#).unwrap();
+    // Require a yyyy-mm-dd (Reuters article slugs)
+    let re_date = Regex::new(r"/20\d{2}-\d{2}-\d{2}").unwrap();
+
+    for cap in re_href.captures_iter(html) {
+        let mut href = cap.get(1).unwrap().as_str().to_string();
+
+        // Strip query/hash
+        if let Some(i) = href.find(['?', '#']) { href.truncate(i); }
+
+        if let Some(u) = normalize_reuters_link(&href) {
+            if (u.contains("/world/") || u.contains("/sustainability/") || u.contains("/technology/"))
+                && re_date.is_match(&u)
+            {
                 out.push(u);
             }
         }
-        if out.len() >= 30 { break; }
+        if out.len() >= 50 { break; }
     }
+
     out.sort();
     out.dedup();
     out.truncate(20);
