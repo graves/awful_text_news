@@ -27,3 +27,4 @@ urlencoding = "2.1.3"
 scraper = "0.24.0"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt", "time"] }
+once_cell = "1.19"
