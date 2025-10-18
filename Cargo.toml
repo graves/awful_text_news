@@ -1,6 +1,6 @@
 [package]
 name = "awful_text_news"
-version = "0.1.17"
+version = "0.1.18"
 edition = "2024"
 authors = ["Thomas Gentry <thomas@awfulsec.com>"]
 description = "Summarize newspaper articles from sources that publish text-only or lite versions of their stories."
