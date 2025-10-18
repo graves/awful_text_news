@@ -18,6 +18,17 @@ static CLIENT: Lazy<Client> = Lazy::new(|| {
             "AppleWebKit/537.36 (KHTML, like Gecko) ",
             "Chrome/127.0.0.0 Safari/537.36"
         ))
+        // These headers help avoid “bare bot” responses
+        .default_headers(
+            {
+                use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, ACCEPT_LANGUAGE, REFERER};
+                let mut h = HeaderMap::new();
+                h.insert(ACCEPT, HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"));
+                h.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
+                h.insert(REFERER, HeaderValue::from_static("https://www.google.com/"));
+                h
+            }
+        )
         .timeout(Duration::from_secs(20))
         .pool_idle_timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::limited(10))
@@ -41,13 +52,9 @@ pub async fn index_articles() -> Result<Vec<String>, Box<dyn Error>> {
         let final_url = res.url().to_string(); // after potential redirects
         let html = res.text().await?;
 
-        // Detect interstitials / JS shells that often break selectors
-        if html.to_lowercase().contains("enable javascript")
-            || html.contains("consent")
-            || html.contains("unusual traffic")
-            || html.contains("arc-sw.js")
-        {
-            warn!(section = *section, "Page may be a JS shell / interstitial; fallbacks will be used.");
+        let looks_like_shell = is_shell_like(&html);
+        if looks_like_shell {
+            warn!(section = *section, "Section HTML looks like JS shell / interstitial; using fallbacks.");
         }
 
         let document = Html::parse_document(&html);
@@ -55,63 +62,80 @@ pub async fn index_articles() -> Result<Vec<String>, Box<dyn Error>> {
         // 1) Primary selectors commonly present on section pages
         let sel_title_link = Selector::parse(r#"a[data-testid="TitleLink"][href]"#).unwrap();
         let sel_heading_link = Selector::parse(r#"a[data-testid="Heading"][href]"#).unwrap();
-        // Extra: some builds use a generic "Link" testid
         let sel_card_link = Selector::parse(r#"a[data-testid="Link"][href]"#).unwrap();
         let sel_generic_cards = Selector::parse(r#"article a[href]"#).unwrap();
 
         let mut urls = Vec::<String>::new();
 
-        harvest_selector(&document, &sel_title_link, &mut urls);
-        if urls.len() < 10 {
-            harvest_selector(&document, &sel_heading_link, &mut urls);
-        }
-        if urls.len() < 10 {
-            harvest_selector(&document, &sel_card_link, &mut urls);
-        }
-        if urls.len() < 10 {
-            harvest_selector(&document, &sel_generic_cards, &mut urls);
-        }
+        if !looks_like_shell {
+            harvest_selector(&document, &sel_title_link, &mut urls);
+            if urls.len() < 10 {
+                harvest_selector(&document, &sel_heading_link, &mut urls);
+            }
+            if urls.len() < 10 {
+                harvest_selector(&document, &sel_card_link, &mut urls);
+            }
+            if urls.len() < 10 {
+                harvest_selector(&document, &sel_generic_cards, &mut urls);
+            }
 
-        // 2) JSON-LD ItemList fallback (very reliable on many list pages)
-        if urls.len() < 10 {
-            let mut from_ld = harvest_itemlist_jsonld(&document);
-            from_ld.retain(|u| is_target_vertical(u));
-            for u in from_ld {
-                if urls.len() >= 10 { break; }
-                if !urls.contains(&u) {
-                    urls.push(u);
+            // 2) JSON-LD ItemList fallback (list pages sometimes include this)
+            if urls.len() < 10 {
+                let mut from_ld = harvest_itemlist_jsonld(&document);
+                from_ld.retain(|u| is_target_vertical(u));
+                for u in from_ld {
+                    if urls.len() >= 10 { break; }
+                    if !urls.contains(&u) { urls.push(u); }
                 }
             }
-        }
 
-        // 3) Regex fallback for article-shaped hrefs (yyyy-mm-dd in slug)
-        if urls.len() < 10 {
-            let mut from_regex = harvest_regex_fallback(&html);
-            from_regex.retain(|u| is_target_vertical(u));
-            for u in from_regex {
-                if urls.len() >= 10 { break; }
-                if !urls.contains(&u) {
-                    urls.push(u);
+            // 3) Regex fallback for article-shaped hrefs (yyyy-mm-dd in slug)
+            if urls.len() < 10 {
+                let mut from_regex = harvest_regex_fallback(&html);
+                from_regex.retain(|u| is_target_vertical(u));
+                for u in from_regex {
+                    if urls.len() >= 10 { break; }
+                    if !urls.contains(&u) { urls.push(u); }
                 }
             }
-        }
 
-        // 4) Very liberal final sweep over any <a href>, requiring a date in path
-        if urls.len() < 10 {
-            let sel_any_a = Selector::parse(r#"a[href]"#).unwrap();
-            let re_date = regex::Regex::new(r"/20\d{2}-\d{2}-\d{2}").unwrap();
+            // 4) Very liberal sweep over any <a href>, requiring a date in path
+            if urls.len() < 10 {
+                let sel_any_a = Selector::parse(r#"a[href]"#).unwrap();
+                let re_date = regex::Regex::new(r"/20\d{2}-\d{2}-\d{2}").unwrap();
 
-            for a in document.select(&sel_any_a) {
-                if let Some(href) = a.value().attr("href") {
-                    if let Some(mut u) = normalize_reuters_link(href) {
-                        // strip query/fragment for stable dedupe
-                        if let Some(i) = u.find(['?', '#']) { u.truncate(i); }
-                        if is_target_vertical(&u) && re_date.is_match(&u) && !urls.contains(&u) {
-                            urls.push(u);
-                            if urls.len() >= 10 { break; }
+                for a in document.select(&sel_any_a) {
+                    if let Some(href) = a.value().attr("href") {
+                        if let Some(mut u) = normalize_reuters_link(href) {
+                            if let Some(i) = u.find(['?', '#']) { u.truncate(i); }
+                            if is_target_vertical(&u) && re_date.is_match(&u) && !urls.contains(&u) {
+                                urls.push(u);
+                                if urls.len() >= 10 { break; }
+                            }
                         }
                     }
                 }
+            }
+        }
+
+        // 5) **RSS fallback** — reliable, server-rendered list of stories
+        if urls.len() < 10 {
+            if let Some(feed_url) = rss_url_for_section(*section) {
+                match fetch_rss_links(feed_url).await {
+                    Ok(mut feed_links) => {
+                        feed_links.retain(|u| is_target_vertical(u));
+                        for u in feed_links {
+                            if urls.len() >= 10 { break; }
+                            if !urls.contains(&u) { urls.push(u); }
+                        }
+                        info!(section = *section, rss = feed_url, added = urls.len(), "RSS fallback applied");
+                    }
+                    Err(e) => {
+                        warn!(section = *section, error = %e, "RSS fallback failed");
+                    }
+                }
+            } else {
+                warn!(section = *section, "No RSS mapping for section; cannot apply RSS fallback");
             }
         }
 
@@ -130,14 +154,22 @@ pub async fn index_articles() -> Result<Vec<String>, Box<dyn Error>> {
     Ok(all)
 }
 
+fn is_shell_like(html: &str) -> bool {
+    let len = html.len();
+    let lc = html.to_lowercase();
+    (len < 2000)
+        || lc.contains("enable javascript")
+        || lc.contains("consent")
+        || lc.contains("unusual traffic")
+        || lc.contains("pfnext") // platform shell marker sometimes present
+        || lc.contains("arc-sw.js")
+}
+
 fn harvest_selector(document: &Html, sel: &Selector, urls: &mut Vec<String>) {
     for a in document.select(sel) {
-        if urls.len() >= 10 {
-            break;
-        }
+        if urls.len() >= 10 { break; }
         if let Some(href) = a.value().attr("href") {
             if let Some(mut url) = normalize_reuters_link(href) {
-                // strip query/hash
                 if let Some(i) = url.find(['?', '#']) { url.truncate(i); }
                 if is_target_vertical(&url) && !urls.contains(&url) {
                     urls.push(url);
@@ -160,7 +192,6 @@ fn harvest_itemlist_jsonld(document: &Html) -> Vec<String> {
             }
         }
     }
-    // normalize, dedupe
     out = out.into_iter().filter_map(|u| normalize_reuters_link(&u)).collect();
     out.sort();
     out.dedup();
@@ -168,14 +199,11 @@ fn harvest_itemlist_jsonld(document: &Html) -> Vec<String> {
     out
 }
 
-/// Recursively walk JSON-LD to pull URLs from ItemList/itemListElement entries
 fn collect_urls_from_ldjson_value(v: &serde_json::Value, out: &mut Vec<String>) {
     use serde_json::Value::*;
     match v {
         Array(arr) => {
-            for item in arr {
-                collect_urls_from_ldjson_value(item, out);
-            }
+            for item in arr { collect_urls_from_ldjson_value(item, out); }
         }
         Object(map) => {
             if let Some(t) = map.get("@type").and_then(|x| x.as_str()) {
@@ -185,15 +213,9 @@ fn collect_urls_from_ldjson_value(v: &serde_json::Value, out: &mut Vec<String>) 
                     }
                 }
             }
-            if let Some(u) = map.get("url").and_then(|x| x.as_str()) {
-                out.push(u.to_string());
-            }
-            if let Some(id) = map.get("@id").and_then(|x| x.as_str()) {
-                out.push(id.to_string());
-            }
-            if let Some(item) = map.get("item") {
-                collect_urls_from_ldjson_value(item, out);
-            }
+            if let Some(u) = map.get("url").and_then(|x| x.as_str()) { out.push(u.to_string()); }
+            if let Some(id) = map.get("@id").and_then(|x| x.as_str()) { out.push(id.to_string()); }
+            if let Some(item) = map.get("item") { collect_urls_from_ldjson_value(item, out); }
         }
         _ => {}
     }
@@ -204,17 +226,12 @@ fn harvest_regex_fallback(html: &str) -> Vec<String> {
     use regex::Regex;
     let mut out = Vec::<String>::new();
 
-    // Grab quoted href-like values (absolute or relative)
     let re_href = Regex::new(r#""(https?://www\.reuters\.com/[^\s"']+|/[^\s"']+)""#).unwrap();
-    // Require a yyyy-mm-dd (Reuters article slugs)
     let re_date = Regex::new(r"/20\d{2}-\d{2}-\d{2}").unwrap();
 
     for cap in re_href.captures_iter(html) {
         let mut href = cap.get(1).unwrap().as_str().to_string();
-
-        // Strip query/hash
         if let Some(i) = href.find(['?', '#']) { href.truncate(i); }
-
         if let Some(u) = normalize_reuters_link(&href) {
             if (u.contains("/world/") || u.contains("/sustainability/") || u.contains("/technology/"))
                 && re_date.is_match(&u)
@@ -243,6 +260,41 @@ fn normalize_reuters_link(href: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Map section URL → Reuters RSS feed
+fn rss_url_for_section(section: &str) -> Option<&'static str> {
+    match section {
+        "https://www.reuters.com/world/" => Some("https://www.reuters.com/world/rss"),
+        "https://www.reuters.com/sustainability/" => Some("https://www.reuters.com/sustainability/rss"),
+        "https://www.reuters.com/technology/" => Some("https://www.reuters.com/technology/rss"),
+        _ => None,
+    }
+}
+
+/// Fetch a Reuters RSS feed and return up to 20 article URLs
+async fn fetch_rss_links(feed_url: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    let xml = CLIENT.get(feed_url).send().await?.text().await?;
+    // Very lightweight parse: collect <link>…</link> under <item>
+    // (Avoiding new deps; this is robust enough for Reuters)
+    let mut out = Vec::<String>::new();
+    let mut in_item = false;
+    for line in xml.lines() {
+        let l = line.trim();
+        if l.starts_with("<item") { in_item = true; }
+        if in_item && l.starts_with("<link>") && l.ends_with("</link>") {
+            let href = l.trim_start_matches("<link>").trim_end_matches("</link>").trim();
+            if let Some(u) = normalize_reuters_link(href) {
+                out.push(u);
+            }
+        }
+        if l.starts_with("</item>") { in_item = false; }
+        if out.len() >= 30 { break; }
+    }
+    out.sort();
+    out.dedup();
+    out.truncate(20);
+    Ok(out)
 }
 
 /// Fetch all Reuters articles concurrently
@@ -314,10 +366,6 @@ async fn fetch_article(url: &str) -> Result<Option<NewsArticle>, Box<dyn Error>>
         .unwrap_or_default();
 
     // ----- CONTENT EXTRACTION -----
-    // Modern Reuters:
-    //   div[data-testid="article-body"] p
-    // Fallbacks:
-    //   article p[data-testid^="paragraph-"], article p
     let candidates = [
         r#"div[data-testid="article-body"] p"#,
         r#"article p[data-testid^="paragraph-"]"#,
@@ -457,7 +505,7 @@ fn extract_published_at(document: &Html) -> (Option<DateTime<FixedOffset>>, Opti
         }
     }
 
-    // E) Textual fallbacks (rare on Reuters — keep as raw only)
+    // E) Textual fallbacks
     if let Ok(sel) = Selector::parse(".ArticleHeader-date, .Page-datePublished, time") {
         if let Some(el) = document.select(&sel).next() {
             let raw = clean(&el.text().collect::<String>());
