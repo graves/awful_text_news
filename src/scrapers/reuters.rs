@@ -1,14 +1,14 @@
 use crate::models::NewsArticle;
 use futures::stream::{self, StreamExt};
 use once_cell::sync::Lazy;
-use reqwest::{Client, Url};
+use reqwest::{header, Client, Url};
 use scraper::{ElementRef, Html, Selector};
 use std::borrow::Cow;
 use std::error::Error;
 use std::time::Duration;
 use tracing::{debug, error, info, instrument, warn};
 
-// --- New: date parsing helpers
+// --- Date/meta helpers
 use chrono::{DateTime, FixedOffset};
 use serde::Deserialize;
 
@@ -16,7 +16,6 @@ use serde::Deserialize;
 use quick_xml::events::Event;
 use quick_xml::{escape, Reader};
 
-// (Optional) You can add default headers here if needed; UA + timeouts are already set.
 static CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::builder()
         .user_agent(concat!(
@@ -37,7 +36,7 @@ const GNEWS_RSS: &[&str] = &[
     "https://news.google.com/rss/search?q=site%3Areuters.com%2Ftechnology%2F&hl=en-US&gl=US&ceid=US%3Aen",
 ];
 
-/// GNews-only indexing (fully drops direct reuters.com scraping)
+/// GNews-only indexing (drops direct reuters.com RSS)
 #[instrument(level = "info")]
 pub async fn index_articles() -> Result<Vec<String>, Box<dyn Error>> {
     let mut all = Vec::<String>::new();
@@ -69,7 +68,6 @@ pub async fn index_articles() -> Result<Vec<String>, Box<dyn Error>> {
 
 #[instrument(level = "debug", skip_all, fields(rss))]
 async fn fetch_gnews_links_with_debug(rss: &str) -> Result<Vec<String>, Box<dyn Error>> {
-    // 1) HTTP request with rich debug
     let req = CLIENT.get(rss);
     debug!("Issuing GET to GNews RSS …");
     let res = req.send().await?;
@@ -78,12 +76,12 @@ async fn fetch_gnews_links_with_debug(rss: &str) -> Result<Vec<String>, Box<dyn 
     let final_url = res.url().to_string();
     let ctype = res
         .headers()
-        .get(reqwest::header::CONTENT_TYPE)
+        .get(header::CONTENT_TYPE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("<none>");
     let clen = res
         .headers()
-        .get(reqwest::header::CONTENT_LENGTH)
+        .get(header::CONTENT_LENGTH)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("<none>");
 
@@ -96,10 +94,8 @@ async fn fetch_gnews_links_with_debug(rss: &str) -> Result<Vec<String>, Box<dyn 
         "GNews RSS body (first 600 chars)"
     );
 
-    // 2) Try strict XML first
     let mut links = parse_gnews_rss_links(&bytes)?;
 
-    // 3) Regex fallback if the strict XML path failed
     if links.is_empty() {
         warn!("XML parse produced 0 links; attempting regex fallback");
         let mut from_rx = harvest_gnews_regex(&body_preview);
@@ -107,12 +103,10 @@ async fn fetch_gnews_links_with_debug(rss: &str) -> Result<Vec<String>, Box<dyn 
         links.append(&mut from_rx);
     }
 
-    // 4) Dedupe & limit
     links.sort();
     links.dedup();
     links.truncate(50);
 
-    // 5) Emit per-link debug
     for (i, u) in links.iter().enumerate() {
         debug!(index = i, url = %u, "GNews candidate URL");
     }
@@ -156,7 +150,6 @@ fn parse_gnews_rss_links(xml_bytes: &[u8]) -> Result<Vec<String>, Box<dyn Error>
             Ok(Event::Text(t)) => {
                 text_nodes += 1;
                 if in_item && in_link {
-                    // BytesText -> &str
                     let raw = match std::str::from_utf8(t.as_ref()) {
                         Ok(s) => s,
                         Err(e) => {
@@ -164,7 +157,6 @@ fn parse_gnews_rss_links(xml_bytes: &[u8]) -> Result<Vec<String>, Box<dyn Error>
                             ""
                         }
                     };
-                    // Unescape XML entities (&amp; etc.)
                     let unescaped: Cow<'_, str> = match escape::unescape(raw) {
                         Ok(cow) => cow,
                         Err(e) => {
@@ -173,30 +165,20 @@ fn parse_gnews_rss_links(xml_bytes: &[u8]) -> Result<Vec<String>, Box<dyn Error>
                         }
                     };
                     let s = unescaped.trim();
-
-                    // Debug the raw link we saw
                     debug!(link = %s, "RSS: <link> text inside <item>");
 
-                    // GNews “real” article links look like:
-                    //   https://news.google.com/rss/articles/...
-                    //   https://news.google.com/articles/...
-                    // We accept both; fetch step will resolve later if needed.
                     if s.starts_with("https://news.google.com/rss/articles/")
                         || s.starts_with("https://news.google.com/articles/")
                     {
                         links.push(s.to_string());
                     } else {
-                        // Sometimes feed presents a /articles/ link in <guid> and a web UI link in <link>.
-                        // We'll log what we saw to diagnose.
                         debug!(skipped_link = %s, "RSS <link> did not match expected Google articles pattern");
                     }
                 }
             }
             Ok(Event::Eof) => break,
             Ok(other) => {
-                // Extra verbosity for debugging parser state
                 if matches!(other, Event::Comment(_) | Event::CData(_)) {
-                    // keep quiet for chatter
                 } else {
                     debug!("RSS: {:?}", other);
                 }
@@ -213,11 +195,11 @@ fn parse_gnews_rss_links(xml_bytes: &[u8]) -> Result<Vec<String>, Box<dyn Error>
     Ok(links)
 }
 
-/// Regex fallback: grab <link>…</link> that contains news.google.com/articles
+/// Regex fallback: grab any GNews /articles/ URL
 fn harvest_gnews_regex(s: &str) -> Vec<String> {
     let mut out = Vec::<String>::new();
-    let re = regex::Regex::new(r#"https://news\.google\.com/(?:rss/)?articles/[A-Za-z0-9_\-?=&#%]+"#).unwrap();
-    for m in re.find_iter(s) {
+    let re = regex::Regex::new(r#"https://news\.google\.com/(?:rss/)?articles/[A-Za-z0-9_\-?=&#%:]+"#).unwrap();
+    for m in re.find(s) {
         out.push(m.as_str().to_string());
         if out.len() >= 100 {
             break;
@@ -229,11 +211,6 @@ fn harvest_gnews_regex(s: &str) -> Vec<String> {
 }
 
 /* ======================= FETCHING ARTICLES ======================= */
-/* The Google News links ultimately point to Reuters content. We keep the rest of
-   your article parsing as-is (modern Reuters selectors + robust date parsing).
-   The change here: if we land on news.google.com, we extract the outbound Reuters
-   URL from the interstitial HTML and follow it.
-*/
 
 /// Fetch all Reuters articles concurrently
 #[instrument(level = "info", skip_all)]
@@ -272,13 +249,19 @@ pub async fn fetch_articles(urls: Vec<String>) -> Vec<NewsArticle> {
 /// Fetch a single article (accepts Google News article URLs and Reuters URLs)
 #[instrument(level = "info", skip_all, fields(%url))]
 async fn fetch_article(url: &str) -> Result<Option<NewsArticle>, Box<dyn Error>> {
-    // First GET whatever we were given (Google News article or Reuters)
-    let resp = CLIENT.get(url).send().await?;
+    // For GNews, send a Referer header; some variants behave differently.
+    let is_gnews_input = url.contains("news.google.com/");
+    let mut req = CLIENT.get(url);
+    if is_gnews_input {
+        req = req.header(header::REFERER, "https://news.google.com/");
+    }
+
+    let resp = req.send().await?;
     let final_url = resp.url().to_string();
     let status = resp.status();
     let ctype = resp
         .headers()
-        .get(reqwest::header::CONTENT_TYPE)
+        .get(header::CONTENT_TYPE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("<none>");
 
@@ -287,7 +270,7 @@ async fn fetch_article(url: &str) -> Result<Option<NewsArticle>, Box<dyn Error>>
     let body = resp.text().await?;
     let document = Html::parse_document(&body);
 
-    // NEW: If we landed on a GNews interstitial, extract and follow the outbound Reuters URL
+    // Detect a GNews interstitial
     let is_gnews = Url::parse(&final_url)
         .ok()
         .and_then(|u| u.domain().map(|d| d.ends_with("news.google.com")))
@@ -297,13 +280,16 @@ async fn fetch_article(url: &str) -> Result<Option<NewsArticle>, Box<dyn Error>>
         if let Some(out) = extract_reuters_from_gnews(&document, &body) {
             info!(outbound = %out, "Extracted outbound Reuters URL from GNews interstitial");
 
-            // Follow the outbound URL
-            let resp2 = CLIENT.get(&out).send().await?;
+            let resp2 = CLIENT
+                .get(&out)
+                .header(header::REFERER, "https://news.google.com/")
+                .send()
+                .await?;
             let final2 = resp2.url().to_string();
             let status2 = resp2.status();
             let ctype2 = resp2
                 .headers()
-                .get(reqwest::header::CONTENT_TYPE)
+                .get(header::CONTENT_TYPE)
                 .and_then(|h| h.to_str().ok())
                 .unwrap_or("<none>");
             info!(%final2, %status2, %ctype2, "Reuters follow-up fetch response");
@@ -320,11 +306,10 @@ async fn fetch_article(url: &str) -> Result<Option<NewsArticle>, Box<dyn Error>>
         }
     }
 
-    // If we already ended up on Reuters, parse directly
+    // Direct Reuters
     if final_url.contains("www.reuters.com") {
         return parse_reuters_html(&final_url, &body);
     } else {
-        // Not on Reuters after following GNews link
         warn!(%final_url, "Landed on non-Reuters domain after following GNews link");
         debug!(
             preview = %body.chars().take(800).collect::<String>().replace('\n', " "),
@@ -359,7 +344,6 @@ fn meta_refresh_target(document: &Html) -> Option<String> {
             // e.g. "0;url=https://www.reuters.com/..."
             if let Some(pos) = content.to_lowercase().find("url=") {
                 let target = &content[pos + 4..];
-                // trim quotes/spaces
                 let t = target.trim().trim_matches('"').trim_matches('\'');
                 if t.starts_with("http://") || t.starts_with("https://") {
                     return Some(t.to_string());
@@ -380,7 +364,7 @@ fn og_url(document: &Html) -> Option<String> {
 }
 
 fn extract_reuters_from_gnews(document: &Html, raw_html: &str) -> Option<String> {
-    // 1) meta refresh wins
+    // 1) meta refresh
     if let Some(u) = meta_refresh_target(document) {
         if Url::parse(&u).ok()?.domain() == Some("www.reuters.com") {
             return Some(u);
@@ -390,26 +374,81 @@ fn extract_reuters_from_gnews(document: &Html, raw_html: &str) -> Option<String>
     if let Some(u) = first_abs_href_on_host(document, "www.reuters.com") {
         return Some(u);
     }
-    // 3) og:url sometimes points to the article
+    // 3) og:url
     if let Some(u) = og_url(document) {
         if Url::parse(&u).ok()?.domain() == Some("www.reuters.com") {
             return Some(u);
         }
     }
-    // 4) Regex fallback anywhere in HTML
-    let re = regex::Regex::new(r#"https://www\.reuters\.com/[^\s"']+"#).ok()?;
-    if let Some(m) = re.find(raw_html) {
-        return Some(m.as_str().to_string());
+
+    // 4) Regex over *escaped* and *encoded* variants inside the HTML blob
+
+    // 4a) Plain (unescaped) URLs anywhere
+    if let Some(u) = regex_find_reuters_plain(raw_html) {
+        return Some(u);
     }
+    // 4b) Escaped as https:\/\/www.reuters.com\/...
+    if let Some(u) = regex_find_reuters_escaped(raw_html) {
+        return Some(u);
+    }
+    // 4c) Percent-encoded: https%3A%2F%2Fwww.reuters.com%2F...
+    if let Some(u) = regex_find_reuters_percent(raw_html) {
+        return Some(u);
+    }
+
     None
 }
 
-/* -------------------- REUTERS PARSER (reused) -------------------- */
+fn regex_find_reuters_plain(s: &str) -> Option<String> {
+    // Avoid breaking on quotes/whitespace/<tags> or backslashes
+    static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r#"https://www\.reuters\.com/[^\s"'\\<>]+"#).unwrap()
+    });
+    RE.find(s).map(|m| m.as_str().to_string())
+}
+
+fn regex_find_reuters_escaped(s: &str) -> Option<String> {
+    // Matches e.g. https:\/\/www.reuters.com\/world\/...  -> de-escape \/ -> /
+    static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r#"https:\\/\\/www\.reuters\.com\\/[^\s"'\\<>]+"#).unwrap()
+    });
+    RE.find(s).map(|m| m.as_str().replace(r#"\/"#, "/").replace(r#"\\u0026"#, "&").replace(r#"\\u003d"#, "="))
+}
+
+fn regex_find_reuters_percent(s: &str) -> Option<String> {
+    // Matches e.g. https%3A%2F%2Fwww.reuters.com%2Fworld%2F... (we "loosely" decode enough tokens)
+    static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r#"https%3A%2F%2Fwww\.reuters\.com%2F[0-9A-Za-z._~:%/+?\-#=&]*"#).unwrap()
+    });
+    RE.find(s).map(|m| loose_percent_decode(m.as_str()))
+}
+
+/// Minimal percent-decoder for the small set we need (avoids new deps)
+fn loose_percent_decode(s: &str) -> String {
+    // Start with the raw; replace common codes. This is safe for URLs we immediately re-parse.
+    let mut out = s.to_string();
+    let reps = [
+        ("%3A", ":"), ("%3a", ":"),
+        ("%2F", "/"), ("%2f", "/"),
+        ("%3F", "?"), ("%3f", "?"),
+        ("%3D", "="), ("%3d", "="),
+        ("%26", "&"),
+        ("%25", "%"),
+        ("%2B", "+"), ("%2b", "+"),
+        ("%23", "#"),
+    ];
+    for (k, v) in reps {
+        out = out.replace(k, v);
+    }
+    out
+}
+
+/* -------------------- REUTERS PARSER (unchanged) -------------------- */
 
 fn parse_reuters_html(final_url: &str, body: &str) -> Result<Option<NewsArticle>, Box<dyn std::error::Error>> {
     let document = Html::parse_document(body);
 
-    // ----- PUBLISHED AT (robust) -----
+    // ----- PUBLISHED AT -----
     let (published_dt, published_raw, published_src) = extract_published_at(&document);
     if let Some(ref raw) = published_raw {
         info!(
@@ -430,7 +469,7 @@ fn parse_reuters_html(final_url: &str, body: &str) -> Result<Option<NewsArticle>
         .or_else(|| text_of_first(&document, "h1"))
         .unwrap_or_default();
 
-    // ----- CONTENT EXTRACTION -----
+    // ----- CONTENT -----
     let candidates = [
         r#"div[data-testid="article-body"] p"#,
         r#"article p[data-testid^="paragraph-"]"#,
@@ -477,7 +516,7 @@ fn parse_reuters_html(final_url: &str, body: &str) -> Result<Option<NewsArticle>
     }
 }
 
-/* -------------------- DATE HELPERS (unchanged) -------------------- */
+/* -------------------- DATE HELPERS -------------------- */
 
 fn looks_like_placeholder(s: &str) -> bool {
     let t = s.trim();
