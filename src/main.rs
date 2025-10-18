@@ -53,12 +53,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let cnn_urls = scrapers::cnn::index_articles().await?;
     let npr_urls = scrapers::npr::index_articles().await?;
     let apnews_urls = scrapers::apnews::index_articles().await?;
+    let reuters_urls = scrapers::reuters::index_articles().await?;
+    let bbcnews_urls = scrapers::bbcnews::index_articles().await?;
 
     let cnn_articles = scrapers::cnn::fetch_articles(cnn_urls).await;
     let npr_articles = scrapers::npr::fetch_articles(npr_urls).await;
     let apnews_articles = scrapers::apnews::fetch_articles(apnews_urls).await;
+    let reuters_articles = scrapers::reuters::fetch_articles(reuters_urls).await;
+    let bbcnews_articles = scrapers::bbcnews::fetch_articles(bbcnews_urls).await;
 
-    let articles = vec![cnn_articles, npr_articles, apnews_articles]
+    let articles = vec![cnn_articles, npr_articles, apnews_articles, reuters_articles, bbcnews_articles]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
