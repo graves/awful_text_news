@@ -69,6 +69,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let config_path = conf_file.to_str().expect("Not a valid config filename");
     let config = config::load_config(config_path).unwrap();
     info!(config_path, "Loaded configuration");
+    
+    // Wrap config and template in Arc for sharing across parallel tasks
+    use std::sync::Arc;
+    let config = Arc::new(config);
+    let template = Arc::new(template);
 
     // ---- Build front page ----
     let local_date = Local::now().date_naive().to_string();
@@ -81,96 +86,113 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
     info!(time_of_day = %front_page.time_of_day, local_date = %front_page.local_date, local_time = %front_page.local_time, "FrontPage initialized");
 
-    // ---- Analyze each article ----
-    let mut processed_count = 0usize;
-    for (i, article) in articles.iter().enumerate() {
-        debug!(index = i, source = %article.source, "Analyzing article");
+    // ---- Analyze articles in parallel (8 at a time) ----
+    use futures::stream::{self, StreamExt};
+    const PARALLEL_BATCH_SIZE: usize = 8;
+    
+    let total_articles = articles.len();
+    info!(parallel_batch_size = PARALLEL_BATCH_SIZE, "Starting parallel article processing");
+    
+    // Process articles concurrently
+    let results: Vec<Option<AwfulNewsArticle>> = stream::iter(articles.iter().enumerate())
+        .map(|(i, article)| {
+            let config = Arc::clone(&config);
+            let template = Arc::clone(&template);
+            async move {
+                debug!(index = i, source = %article.source, "Analyzing article");
 
-        // First ask
-        match ask_with_backoff(&config, &article.content, &template).await {
-            Ok(response_json) => {
-                // Quarantine + meta
-                log_and_quarantine(i, &response_json);
+                // First ask
+                match ask_with_backoff(&config, &article.content, &template).await {
+                    Ok(response_json) => {
+                        // Quarantine + meta
+                        log_and_quarantine(i, &response_json);
 
-                // Try parse
-                let mut parsed = serde_json::from_str::<AwfulNewsArticle>(&response_json);
+                        // Try parse
+                        let mut parsed = serde_json::from_str::<AwfulNewsArticle>(&response_json);
 
-                // If the parse failed due to EOF (truncation), re-ask ONCE
-                if let Err(ref e) = parsed {
-                    if looks_truncated(e) {
-                        warn!(index = i, error = %e, "EOF while parsing; re-asking once");
-                        match ask_with_backoff(&config, &article.content, &template).await {
-                            Ok(r2) => {
-                                log_and_quarantine(i, &r2);
-                                parsed = serde_json::from_str::<AwfulNewsArticle>(&r2);
-                            }
-                            Err(e2) => {
-                                warn!(index = i, error = %e2, "Re-ask failed; will skip article");
+                        // If the parse failed due to EOF (truncation), re-ask ONCE
+                        if let Err(ref e) = parsed {
+                            if looks_truncated(e) {
+                                warn!(index = i, error = %e, "EOF while parsing; re-asking once");
+                                match ask_with_backoff(&config, &article.content, &template).await {
+                                    Ok(r2) => {
+                                        log_and_quarantine(i, &r2);
+                                        parsed = serde_json::from_str::<AwfulNewsArticle>(&r2);
+                                    }
+                                    Err(e2) => {
+                                        warn!(index = i, error = %e2, "Re-ask failed; will skip article");
+                                    }
+                                }
                             }
                         }
-                    }
-                }
 
-                match parsed {
-                    Ok(mut awful_news_article) => {
-                        awful_news_article.source = Some(article.source.clone());
-                        awful_news_article.content = Some(article.content.clone());
+                        match parsed {
+                            Ok(mut awful_news_article) => {
+                                awful_news_article.source = Some(article.source.clone());
+                                awful_news_article.content = Some(article.content.clone());
 
-                        // dedupe
-                        awful_news_article.namedEntities = awful_news_article
-                            .namedEntities
-                            .into_iter()
-                            .unique_by(|e| e.name.clone())
-                            .collect::<Vec<NamedEntity>>();
-                        awful_news_article.importantDates = awful_news_article
-                            .importantDates
-                            .into_iter()
-                            .unique_by(|e| e.descriptionOfWhyDateIsRelevant.clone())
-                            .collect::<Vec<ImportantDate>>();
-                        awful_news_article.importantTimeframes = awful_news_article
-                            .importantTimeframes
-                            .into_iter()
-                            .unique_by(|e| e.descriptionOfWhyTimeFrameIsRelevant.clone())
-                            .collect::<Vec<ImportantTimeframe>>();
-                        awful_news_article.keyTakeAways = awful_news_article
-                            .keyTakeAways
-                            .into_iter()
-                            .unique()
-                            .collect::<Vec<String>>();
+                                // dedupe
+                                awful_news_article.namedEntities = awful_news_article
+                                    .namedEntities
+                                    .into_iter()
+                                    .unique_by(|e| e.name.clone())
+                                    .collect::<Vec<NamedEntity>>();
+                                awful_news_article.importantDates = awful_news_article
+                                    .importantDates
+                                    .into_iter()
+                                    .unique_by(|e| e.descriptionOfWhyDateIsRelevant.clone())
+                                    .collect::<Vec<ImportantDate>>();
+                                awful_news_article.importantTimeframes = awful_news_article
+                                    .importantTimeframes
+                                    .into_iter()
+                                    .unique_by(|e| e.descriptionOfWhyTimeFrameIsRelevant.clone())
+                                    .collect::<Vec<ImportantTimeframe>>();
+                                awful_news_article.keyTakeAways = awful_news_article
+                                    .keyTakeAways
+                                    .into_iter()
+                                    .unique()
+                                    .collect::<Vec<String>>();
 
-                        front_page.articles.push(awful_news_article);
-                        info!(
-                            index = i,
-                            total_articles = front_page.articles.len(),
-                            "Added analyzed article to FrontPage"
-                        );
-
-                        // Persist incremental JSON
-                        if let Err(e) = json::write_frontpage(&front_page, &args.json_output_dir).await {
-                            error!(error = %e, index = i, "Failed to write incremental JSON");
+                                info!(index = i, "Successfully processed article");
+                                Some(awful_news_article)
+                            }
+                            Err(e) => {
+                                warn!(
+                                    index = i,
+                                    error = %e,
+                                    response_preview = %truncate_for_log(&response_json, 300),
+                                    "Model returned non-conforming JSON; skipping article"
+                                );
+                                None
+                            }
                         }
                     }
                     Err(e) => {
-                        warn!(
-                            index = i,
-                            error = %e,
-                            response_preview = %truncate_for_log(&response_json, 300),
-                            "Model returned non-conforming JSON; skipping article"
-                        );
+                        error!(index = i, source = %article.source, error = %e, "API call failed; skipping article");
+                        None
                     }
                 }
             }
-            Err(e) => {
-                error!(index = i, source = %article.source, error = %e, "API call failed; skipping article");
-            }
-        }
+        })
+        .buffer_unordered(PARALLEL_BATCH_SIZE)
+        .collect()
+        .await;
 
-        processed_count += 1;
-        info!(
-            processed = processed_count,
-            total = articles.len(),
-            "Progress"
-        );
+    // Add successful results to front_page
+    for result in results.into_iter().flatten() {
+        front_page.articles.push(result);
+    }
+    
+    info!(
+        total = total_articles,
+        successful = front_page.articles.len(),
+        failed = total_articles - front_page.articles.len(),
+        "Completed parallel article processing"
+    );
+
+    // Write final JSON after all articles processed
+    if let Err(e) = json::write_frontpage(&front_page, &args.json_output_dir).await {
+        error!(error = %e, "Failed to write final JSON");
     }
 
     // ---- Markdown output ----
