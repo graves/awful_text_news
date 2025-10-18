@@ -231,9 +231,8 @@ fn harvest_gnews_regex(s: &str) -> Vec<String> {
 /* ======================= FETCHING ARTICLES ======================= */
 /* The Google News links ultimately point to Reuters content. We keep the rest of
    your article parsing as-is (modern Reuters selectors + robust date parsing).
-   The only change is: we *do not* filter on reuters.com in indexing anymore,
-   so fetch_article should handle Google redirect pages too by following the URL
-   it lands on and then scraping if it is Reuters.
+   The change here: if we land on news.google.com, we extract the outbound Reuters
+   URL from the interstitial HTML and follow it.
 */
 
 /// Fetch all Reuters articles concurrently
@@ -288,84 +287,191 @@ async fn fetch_article(url: &str) -> Result<Option<NewsArticle>, Box<dyn Error>>
     let body = resp.text().await?;
     let document = Html::parse_document(&body);
 
-    // If we ended up on Reuters, continue with the original parsing pipeline.
-    if final_url.contains("www.reuters.com") {
-        // ----- PUBLISHED AT (robust) -----
-        let (published_dt, published_raw, published_src) = extract_published_at(&document);
-        if let Some(ref raw) = published_raw {
-            info!(
-                source = published_src,
-                raw = %raw,
-                iso = published_dt
-                    .as_ref()
-                    .map(|d| d.to_rfc3339())
-                    .unwrap_or_else(|| "n/a".into()),
-                "Published-at parsed"
-            );
+    // NEW: If we landed on a GNews interstitial, extract and follow the outbound Reuters URL
+    let is_gnews = Url::parse(&final_url)
+        .ok()
+        .and_then(|u| u.domain().map(|d| d.ends_with("news.google.com")))
+        .unwrap_or(false);
+
+    if is_gnews {
+        if let Some(out) = extract_reuters_from_gnews(&document, &body) {
+            info!(outbound = %out, "Extracted outbound Reuters URL from GNews interstitial");
+
+            // Follow the outbound URL
+            let resp2 = CLIENT.get(&out).send().await?;
+            let final2 = resp2.url().to_string();
+            let status2 = resp2.status();
+            let ctype2 = resp2
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|h| h.to_str().ok())
+                .unwrap_or("<none>");
+            info!(%final2, %status2, %ctype2, "Reuters follow-up fetch response");
+
+            let body2 = resp2.text().await?;
+            return parse_reuters_html(&final2, &body2);
         } else {
-            info!("Published-at parsed source=none");
-        }
-
-        // ----- TITLE -----
-        let title = meta_content(&document, r#"meta[property="og:title"]"#, "content")
-            .or_else(|| text_of_first(&document, "h1"))
-            .unwrap_or_default();
-
-        // ----- CONTENT EXTRACTION -----
-        let candidates = [
-            r#"div[data-testid="article-body"] p"#,
-            r#"article p[data-testid^="paragraph-"]"#,
-            r#"article p"#,
-        ];
-        let mut content = String::new();
-        let mut found = false;
-
-        for sel in candidates.iter().filter_map(|s| Selector::parse(s).ok()) {
-            let mut parts = Vec::<String>::new();
-            for node in document.select(&sel) {
-                let text = node.text().collect::<Vec<_>>().join(" ").trim().to_string();
-                if !text.is_empty() {
-                    parts.push(text);
-                }
-            }
-            if !parts.is_empty() {
-                content = parts.join("\n\n");
-                found = true;
-                break;
-            }
-        }
-
-        // Prepend Title + Date
-        if !title.is_empty() {
-            content = format!("Title: {}\n\n{}", title, content);
-        }
-        if let Some(dt) = published_dt {
-            content = format!("Published: {}\n\n{}", dt.to_rfc3339(), content);
-        } else if let Some(raw) = published_raw {
-            content = format!("Published(raw): {}\n\n{}", raw, content);
-        }
-
-        let len = content.len();
-        info!(bytes = len, "Parsed Reuters article");
-
-        if found && len > 0 {
-            return Ok(Some(NewsArticle {
-                source: final_url,
-                content,
-            }));
-        } else {
+            warn!("Landed on news.google.com but failed to extract outbound Reuters link");
             debug!(
-                preview = %body.chars().take(600).collect::<String>().replace('\n', " "),
-                "No article content parsed; HTML preview"
+                preview = %body.chars().take(800).collect::<String>().replace('\n', " "),
+                "GNews interstitial HTML preview"
             );
             return Ok(None);
         }
+    }
+
+    // If we already ended up on Reuters, parse directly
+    if final_url.contains("www.reuters.com") {
+        return parse_reuters_html(&final_url, &body);
     } else {
-        // Not on Reuters after following redirects. We still log a short preview for debugging.
+        // Not on Reuters after following GNews link
         warn!(%final_url, "Landed on non-Reuters domain after following GNews link");
         debug!(
-            preview = %body.chars().take(600).collect::<String>().replace('\n', " "),
+            preview = %body.chars().take(800).collect::<String>().replace('\n', " "),
             "Non-Reuters HTML preview"
+        );
+        Ok(None)
+    }
+}
+
+/* -------------------- OUTBOUND EXTRACTION HELPERS -------------------- */
+
+fn first_abs_href_on_host(document: &Html, host: &str) -> Option<String> {
+    let sel = Selector::parse("a[href]").ok()?;
+    for a in document.select(&sel) {
+        if let Some(href) = a.value().attr("href") {
+            if href.starts_with("http://") || href.starts_with("https://") {
+                if let Ok(u) = Url::parse(href) {
+                    if u.domain() == Some(host) {
+                        return Some(href.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn meta_refresh_target(document: &Html) -> Option<String> {
+    let sel = Selector::parse(r#"meta[http-equiv="refresh"]"#).ok()?;
+    for m in document.select(&sel) {
+        if let Some(content) = m.value().attr("content") {
+            // e.g. "0;url=https://www.reuters.com/..."
+            if let Some(pos) = content.to_lowercase().find("url=") {
+                let target = &content[pos + 4..];
+                // trim quotes/spaces
+                let t = target.trim().trim_matches('"').trim_matches('\'');
+                if t.starts_with("http://") || t.starts_with("https://") {
+                    return Some(t.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn og_url(document: &Html) -> Option<String> {
+    let sel = Selector::parse(r#"meta[property="og:url"]"#).ok()?;
+    document
+        .select(&sel)
+        .next()
+        .and_then(|n| n.value().attr("content"))
+        .map(|s| s.to_string())
+}
+
+fn extract_reuters_from_gnews(document: &Html, raw_html: &str) -> Option<String> {
+    // 1) meta refresh wins
+    if let Some(u) = meta_refresh_target(document) {
+        if Url::parse(&u).ok()?.domain() == Some("www.reuters.com") {
+            return Some(u);
+        }
+    }
+    // 2) <a href="https://www.reuters.com/...">
+    if let Some(u) = first_abs_href_on_host(document, "www.reuters.com") {
+        return Some(u);
+    }
+    // 3) og:url sometimes points to the article
+    if let Some(u) = og_url(document) {
+        if Url::parse(&u).ok()?.domain() == Some("www.reuters.com") {
+            return Some(u);
+        }
+    }
+    // 4) Regex fallback anywhere in HTML
+    let re = regex::Regex::new(r#"https://www\.reuters\.com/[^\s"']+"#).ok()?;
+    if let Some(m) = re.find(raw_html) {
+        return Some(m.as_str().to_string());
+    }
+    None
+}
+
+/* -------------------- REUTERS PARSER (reused) -------------------- */
+
+fn parse_reuters_html(final_url: &str, body: &str) -> Result<Option<NewsArticle>, Box<dyn std::error::Error>> {
+    let document = Html::parse_document(body);
+
+    // ----- PUBLISHED AT (robust) -----
+    let (published_dt, published_raw, published_src) = extract_published_at(&document);
+    if let Some(ref raw) = published_raw {
+        info!(
+            source = published_src,
+            raw = %raw,
+            iso = published_dt
+                .as_ref()
+                .map(|d| d.to_rfc3339())
+                .unwrap_or_else(|| "n/a".into()),
+            "Published-at parsed"
+        );
+    } else {
+        info!("Published-at parsed source=none");
+    }
+
+    // ----- TITLE -----
+    let title = meta_content(&document, r#"meta[property="og:title"]"#, "content")
+        .or_else(|| text_of_first(&document, "h1"))
+        .unwrap_or_default();
+
+    // ----- CONTENT EXTRACTION -----
+    let candidates = [
+        r#"div[data-testid="article-body"] p"#,
+        r#"article p[data-testid^="paragraph-"]"#,
+        r#"article p"#,
+    ];
+    let mut content = String::new();
+    let mut found = false;
+
+    for sel in candidates.iter().filter_map(|s| Selector::parse(s).ok()) {
+        let mut parts = Vec::<String>::new();
+        for node in document.select(&sel) {
+            let text = node.text().collect::<Vec<_>>().join(" ").trim().to_string();
+            if !text.is_empty() {
+                parts.push(text);
+            }
+        }
+        if !parts.is_empty() {
+            content = parts.join("\n\n");
+            found = true;
+            break;
+        }
+    }
+
+    if !title.is_empty() {
+        content = format!("Title: {}\n\n{}", title, content);
+    }
+    if let Some(dt) = published_dt {
+        content = format!("Published: {}\n\n{}", dt.to_rfc3339(), content);
+    } else if let Some(raw) = published_raw {
+        content = format!("Published(raw): {}\n\n{}", raw, content);
+    }
+
+    let len = content.len();
+    info!(%final_url, bytes = len, "Parsed Reuters article");
+
+    if found && len > 0 {
+        Ok(Some(NewsArticle { source: final_url.to_string(), content }))
+    } else {
+        debug!(
+            preview = %body.chars().take(800).collect::<String>().replace('\n', " "),
+            "No article content parsed; HTML preview"
         );
         Ok(None)
     }
