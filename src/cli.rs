@@ -12,6 +12,10 @@ pub struct Cli {
     /// Output directory for the Markdown file
     #[arg(short, long)]
     pub markdown_output_dir: String,
+
+    /// Optional path to config.yaml file
+    #[arg(short, long)]
+    pub config: Option<String>,
 }
 
 #[cfg(test)]
