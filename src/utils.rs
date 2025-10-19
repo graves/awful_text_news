@@ -69,7 +69,7 @@ pub fn looks_truncated(e: &serde_json::Error) -> bool {
 pub fn slugify_title(title: &str) -> String {
     title
         .to_lowercase()
-        .replace(|c: char| !c.is_alphanumeric() && c != ' ', "")
+        .replace(|c: char| !c.is_alphanumeric() && c != ' ' && c != '-', "")
         .replace(' ', "-")
 }
 
@@ -122,11 +122,15 @@ mod tests {
     #[test]
     fn test_slugify_title() {
         assert_eq!(slugify_title("Hello World"), "hello-world");
-        assert_eq!(slugify_title("Test-Article!"), "testarticle");
+        assert_eq!(slugify_title("Test-Article!"), "test-article");
         assert_eq!(slugify_title("Multiple   Spaces"), "multiple---spaces");
         assert_eq!(
             slugify_title("Special@#$Characters"),
             "specialcharacters"
+        );
+        assert_eq!(
+            slugify_title("Trump-Xi 'situationship'"),
+            "trump-xi-situationship"
         );
     }
 

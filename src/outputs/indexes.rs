@@ -51,10 +51,16 @@ pub async fn update_date_toc_file(
         writeln!(toc_md, "\t- [**{}**]({}#{})", category, markdown_filename, category_slug).unwrap();
         
         for article in articles {
-            let slug = slugify_title(&article.title);
+            let mut slug = slugify_title(&article.title);
             let source_tag = article.source_tag()
                 .map(|tag| format!(" <small>`{}`</small>", tag))
                 .unwrap_or_default();
+            
+            // Append source tag to slug for proper anchor linking
+            if let Some(tag) = article.source_tag() {
+                slug.push_str("---");
+                slug.push_str(&tag);
+            }
             
             writeln!(
                 toc_md,
