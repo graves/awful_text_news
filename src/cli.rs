@@ -16,6 +16,10 @@ pub struct Cli {
     /// Optional path to config.yaml file
     #[arg(short, long)]
     pub config: Option<String>,
+
+    /// New York Times API key
+    #[arg(long, env = "NYT_API_KEY")]
+    pub nyt_api_key: Option<String>,
 }
 
 #[cfg(test)]
