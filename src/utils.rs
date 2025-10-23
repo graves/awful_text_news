@@ -1,9 +1,6 @@
 use chrono::{Local, NaiveTime};
-use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::fs as stdfs;
-use std::hash::{Hash, Hasher};
-use std::io::Write as IoWrite;
 use tokio::fs;
 use tracing::{info, instrument, warn};
 
@@ -33,29 +30,6 @@ pub fn truncate_for_log(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("{}…(+{} bytes)", &s[..max], s.len() - max)
-    }
-}
-
-/// Save raw API response to ./_debug/responses with a stable-ish fingerprint.
-/// Always best-effort (errors ignored), but we log path + size.
-pub fn log_and_quarantine(index: usize, body: &str) {
-    if let Err(e) = stdfs::create_dir_all("./_debug/responses") {
-        warn!(error = %e, "Failed to create quarantine dir");
-        return;
-    }
-    let mut hasher = DefaultHasher::new();
-    body.hash(&mut hasher);
-    let fp = hasher.finish();
-    let path = format!("./_debug/responses/resp_{index}_{fp:016x}.json");
-    match stdfs::File::create(&path) {
-        Ok(mut f) => {
-            if let Err(e) = f.write_all(body.as_bytes()) {
-                warn!(path = %path, error = %e, "Failed to write quarantined response");
-            } else {
-                info!(index, path = %path, bytes = body.len(), "Quarantined raw API response");
-            }
-        }
-        Err(e) => warn!(path = %path, error = %e, "Failed to create quarantined response file"),
     }
 }
 

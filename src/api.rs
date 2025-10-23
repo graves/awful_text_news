@@ -60,14 +60,6 @@ where
             let attempt_t0 = Instant::now();
             match self.inner.ask(text).await {
                 Ok(resp) => {
-                    let attempt_dt = attempt_t0.elapsed();
-                    let total_dt = total_t0.elapsed();
-                    info!(
-                        attempt,
-                        elapsed_ms_attempt = attempt_dt.as_millis() as u128,
-                        elapsed_ms_total = total_dt.as_millis() as u128,
-                        "ask() attempt succeeded"
-                    );
                     return Ok(resp);
                 }
                 Err(e) => {
@@ -128,7 +120,7 @@ impl<'a> AskAsync for AskFnWrapper<'a> {
         let dt = t0.elapsed();
 
         match &res {
-            Ok(_) => info!(elapsed_ms = dt.as_millis() as u128, "API call succeeded"),
+            Ok(_) => {}
             Err(e) => warn!(elapsed_ms = dt.as_millis() as u128, error = %e, "API call failed"),
         }
         res

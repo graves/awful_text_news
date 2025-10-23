@@ -17,7 +17,7 @@ use api::ask_with_backoff;
 use cli::Cli;
 use models::{AwfulNewsArticle, FrontPage, ImportantDate, ImportantTimeframe, NamedEntity};
 use outputs::{indexes, json, markdown};
-use utils::{ensure_writable_dir, log_and_quarantine, looks_truncated, time_of_day, truncate_for_log};
+use utils::{ensure_writable_dir, looks_truncated, time_of_day, truncate_for_log};
 
 #[tokio::main]
 #[instrument]
@@ -27,8 +27,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tfmt()
         .with_env_filter(filter)
         .with_target(true)
-        .with_file(true)
-        .with_line_number(true)
+        .with_file(false)
+        .with_line_number(false)
         .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
         .init();
 
@@ -112,9 +112,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 // First ask
                 match ask_with_backoff(&config, &article.content, &template).await {
                     Ok(response_json) => {
-                        // Quarantine + meta
-                        log_and_quarantine(i, &response_json);
-
                         // Try parse
                         let mut parsed = serde_json::from_str::<AwfulNewsArticle>(&response_json);
 
@@ -124,7 +121,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 warn!(index = i, error = %e, "EOF while parsing; re-asking once");
                                 match ask_with_backoff(&config, &article.content, &template).await {
                                     Ok(r2) => {
-                                        log_and_quarantine(i, &r2);
                                         parsed = serde_json::from_str::<AwfulNewsArticle>(&r2);
                                     }
                                     Err(e2) => {
