@@ -31,11 +31,12 @@ struct NYTimesResponse {
 #[derive(Debug, Deserialize)]
 struct NYTimesArticle {
     url: String,
+    title: String,
 }
 
 /// Index NYT articles via their Top Stories API
 #[instrument(level = "info")]
-pub async fn index_articles(api_key: Option<&str>) -> Result<Vec<String>, Box<dyn Error>> {
+pub async fn index_articles(api_key: Option<&str>) -> Result<Vec<(String, String)>, Box<dyn Error>> {
     let api_key = match api_key {
         Some(key) => key,
         None => {
@@ -62,32 +63,32 @@ pub async fn index_articles(api_key: Option<&str>) -> Result<Vec<String>, Box<dy
 
     let nyt_response: NYTimesResponse = response.json().await?;
     
-    // Take first 30 URLs
-    let article_urls: Vec<String> = nyt_response
+    // Take first 30 URLs and titles
+    let articles: Vec<(String, String)> = nyt_response
         .results
         .into_iter()
         .take(30)
-        .map(|article| article.url)
+        .map(|article| (article.url, article.title))
         .collect();
 
     info!(
-        count = article_urls.len(),
+        count = articles.len(),
         source = "NYT Top Stories API",
-        "Indexed NYT article URLs"
+        "Indexed NYT article URLs and titles"
     );
-    debug!(urls = ?article_urls, "NYT URLs");
+    debug!(articles = ?articles, "NYT URLs and titles");
 
-    Ok(article_urls)
+    Ok(articles)
 }
 
 /// Fetch all NYT articles concurrently through removepaywalls.com
 #[instrument(level = "info", skip_all)]
-pub async fn fetch_articles(urls: Vec<String>) -> Vec<NewsArticle> {
+pub async fn fetch_articles(articles: Vec<(String, String)>) -> Vec<NewsArticle> {
     let concurrency = 4usize; // Lower concurrency to be respectful to removepaywalls.com
 
-    let articles: Vec<NewsArticle> = stream::iter(urls.into_iter())
-        .map(|url| async move {
-            let res = fetch_article(&url).await;
+    let articles: Vec<NewsArticle> = stream::iter(articles.into_iter())
+        .map(|(url, api_title)| async move {
+            let res = fetch_article(&url, &api_title).await;
             (url, res)
         })
         .buffer_unordered(concurrency)
@@ -116,7 +117,7 @@ pub async fn fetch_articles(urls: Vec<String>) -> Vec<NewsArticle> {
 
 /// Fetch a single NYT article through accessarticlenow.com (the iframe backend)
 #[instrument(level = "info", skip_all, fields(%url))]
-async fn fetch_article(url: &str) -> Result<Option<NewsArticle>, Box<dyn Error>> {
+async fn fetch_article(url: &str, api_title: &str) -> Result<Option<NewsArticle>, Box<dyn Error>> {
     // Construct the accessarticlenow.com URL (this is what removepaywalls.com uses in its iframe)
     let proxy_url = format!("https://accessarticlenow.com/api/c/full?q={}", url);
     
@@ -131,13 +132,21 @@ async fn fetch_article(url: &str) -> Result<Option<NewsArticle>, Box<dyn Error>>
         .or_else(|_| Selector::parse("h1"))
         .unwrap();
     
-    let title = document
+    let scraped_title = document
         .select(&title_selector)
         .next()
         .map(|el| el.text().collect::<String>().trim().to_string())
-        .unwrap_or_else(|| "No title found".to_string());
+        .unwrap_or_default();
 
-    debug!(title = %title, "Extracted title");
+    // Use API title as fallback if scraped title is empty or blank
+    let title = if scraped_title.is_empty() || scraped_title.trim().is_empty() {
+        debug!(api_title = %api_title, "Using API title as fallback (scraped title was blank)");
+        api_title.to_string()
+    } else {
+        scraped_title
+    };
+
+    debug!(title = %title, "Final title");
 
     // Extract published date
     let time_selector = Selector::parse(r#"time[datetime]"#).unwrap();

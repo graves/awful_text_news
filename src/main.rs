@@ -55,14 +55,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let apnews_urls = scrapers::apnews::index_articles().await?;
     let aljazeera_urls = scrapers::aljazeera::index_articles().await?;
     let bbcnews_urls = scrapers::bbcnews::index_articles().await?;
-    let nyt_urls = scrapers::nyt::index_articles(args.nyt_api_key.as_deref()).await?;
+    let nyt_articles_with_titles = scrapers::nyt::index_articles(args.nyt_api_key.as_deref()).await?;
 
     let cnn_articles = scrapers::cnn::fetch_articles(cnn_urls).await;
     let npr_articles = scrapers::npr::fetch_articles(npr_urls).await;
     let apnews_articles = scrapers::apnews::fetch_articles(apnews_urls).await;
     let aljazeera_articles = scrapers::aljazeera::fetch_articles(aljazeera_urls).await;
     let bbcnews_articles = scrapers::bbcnews::fetch_articles(bbcnews_urls).await;
-    let nyt_articles = scrapers::nyt::fetch_articles(nyt_urls).await;
+    let nyt_articles = scrapers::nyt::fetch_articles(nyt_articles_with_titles).await;
 
     let articles = vec![cnn_articles, npr_articles, apnews_articles, aljazeera_articles, bbcnews_articles, nyt_articles]
         .into_iter()
