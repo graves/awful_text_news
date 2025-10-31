@@ -94,9 +94,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
     info!(time_of_day = %front_page.time_of_day, local_date = %front_page.local_date, local_time = %front_page.local_time, "FrontPage initialized");
 
-    // ---- Analyze articles in parallel (4 at a time) ----
+    // ---- Analyze articles in parallel (12 at a time) ----
     use futures::stream::{self, StreamExt};
-    const PARALLEL_BATCH_SIZE: usize = 4;
+    const PARALLEL_BATCH_SIZE: usize = 12;
     
     let total_articles = articles.len();
     info!(parallel_batch_size = PARALLEL_BATCH_SIZE, "Starting parallel article processing");
