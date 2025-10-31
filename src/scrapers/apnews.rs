@@ -170,7 +170,7 @@ async fn fetch_article(url: &str) -> Result<Option<NewsArticle>, Box<dyn Error>>
 
     for sel in candidates.iter().filter_map(|s| Selector::parse(s).ok()) {
         for node in document.select(&sel) {
-            let text = node.text().collect::<Vec<_>>().join(" ");
+            let text = extract_clean_text(&node);
             if !text.trim().is_empty() {
                 if !content.is_empty() {
                     content.push_str("\n\n");
@@ -207,6 +207,35 @@ async fn fetch_article(url: &str) -> Result<Option<NewsArticle>, Box<dyn Error>>
         );
         Ok(None)
     }
+}
+
+/* -------------------- TEXT SANITIZATION HELPERS -------------------- */
+
+/// Extract clean text from an HTML element, excluding script and style tags
+fn extract_clean_text(element: &ElementRef) -> String {
+    let script_sel = Selector::parse("script").unwrap();
+    let style_sel = Selector::parse("style").unwrap();
+    
+    let mut text_parts = Vec::new();
+    
+    for node in element.descendants() {
+        // Skip script and style elements entirely
+        if let Some(elem) = ElementRef::wrap(node) {
+            if script_sel.matches(&elem) || style_sel.matches(&elem) {
+                continue;
+            }
+        }
+        
+        // Collect text nodes
+        if let Some(text) = node.value().as_text() {
+            let content = text.trim();
+            if !content.is_empty() {
+                text_parts.push(content);
+            }
+        }
+    }
+    
+    text_parts.join(" ")
 }
 
 /* -------------------- DATE HELPERS -------------------- */
