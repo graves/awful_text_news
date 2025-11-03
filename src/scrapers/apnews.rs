@@ -219,18 +219,27 @@ fn extract_clean_text(element: &ElementRef) -> String {
     let mut text_parts = Vec::new();
     
     for node in element.descendants() {
-        // Skip script and style elements entirely
-        if let Some(elem) = ElementRef::wrap(node) {
-            if script_sel.matches(&elem) || style_sel.matches(&elem) {
-                continue;
-            }
-        }
-        
-        // Collect text nodes
+        // Collect text nodes, but only if they're not inside script/style tags
         if let Some(text) = node.value().as_text() {
             let content = text.trim();
             if !content.is_empty() {
-                text_parts.push(content);
+                // Check if any ancestor is a script or style tag
+                let mut current = node.parent();
+                let mut in_excluded_tag = false;
+                
+                while let Some(ancestor) = current {
+                    if let Some(elem) = ElementRef::wrap(ancestor) {
+                        if script_sel.matches(&elem) || style_sel.matches(&elem) {
+                            in_excluded_tag = true;
+                            break;
+                        }
+                    }
+                    current = ancestor.parent();
+                }
+                
+                if !in_excluded_tag {
+                    text_parts.push(content);
+                }
             }
         }
     }
