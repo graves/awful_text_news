@@ -119,7 +119,7 @@ pub async fn fetch_articles(articles: Vec<(String, String)>) -> Vec<NewsArticle>
 #[instrument(level = "info", skip_all, fields(%url))]
 async fn fetch_article(url: &str, api_title: &str) -> Result<Option<NewsArticle>, Box<dyn Error>> {
     // Construct the accessarticlenow.com URL (this is what removepaywalls.com uses in its iframe)
-    let proxy_url = format!("https://accessarticlenow.com/api/c/full?q={}", url);
+    let proxy_url = format!("https://accessarticlenow.com/api/c/google?q={}", url);
     
     info!(%proxy_url, "Fetching through accessarticlenow.com");
     
